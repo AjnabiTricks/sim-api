@@ -56,23 +56,27 @@ export default async function handler(req, res) {
 
     const data = await response.json();
 
-    // --- TRANSFORM RESPONSE ---
-    // Remove creator/credit
-    if (data.creator) {
-      delete data.creator;
-    }
-
-    // Check if data is array (CNIC search) or object (Phone search)
+    // --- REMOVE DUPLICATES (by Mobile number) ---
     let formattedData;
-    
+    const seenMobiles = new Set();
+
     if (Array.isArray(data.data)) {
-      // CNIC search returns array of objects
-      formattedData = data.data.map(item => ({
-        Name: item.Name || 'N/A',
-        Cnic: item.CNIC || 'N/A',
-        Mobile: item.Mobile || 'N/A',
-        Address: item.ADDRESS || 'N/A'
-      }));
+      // CNIC search returns array
+      formattedData = data.data
+        .filter(item => {
+          const mobile = item.Mobile || '';
+          if (mobile && !seenMobiles.has(mobile)) {
+            seenMobiles.add(mobile);
+            return true;
+          }
+          return false;
+        })
+        .map(item => ({
+          Name: item.Name || 'N/A',
+          Cnic: item.CNIC || 'N/A',
+          Mobile: item.Mobile || 'N/A',
+          Address: item.ADDRESS || 'N/A'
+        }));
     } else if (data.data && typeof data.data === 'object') {
       // Phone search returns single object
       const item = data.data;
@@ -86,13 +90,20 @@ export default async function handler(req, res) {
       formattedData = data.data || null;
     }
 
+    // --- ADD CREDIT (Always at the end) ---
+    const credit = {
+      credit: "AZ Tricks",
+      telegram: "https://t.me/AZ_Tricks"
+    };
+
     // Final response structure
     const finalResponse = {
       success: data.success || true,
       query: data.query || search,
       type: data.type || (isCNIC ? 'cnic' : 'phone'),
-      total: data.total || (Array.isArray(formattedData) ? formattedData.length : 1),
-      data: formattedData
+      total: Array.isArray(formattedData) ? formattedData.length : 1,
+      data: formattedData,
+      ...credit  // Credit added at the end
     };
 
     return res.status(200).json(finalResponse);
@@ -105,4 +116,4 @@ export default async function handler(req, res) {
       message: error.message
     });
   }
-}
+        }
