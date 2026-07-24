@@ -17,11 +17,54 @@ export default async function handler(req, res) {
     });
   }
 
-  // Auto-detect: CNIC (13 digits) or Phone (11 digits starting with 03)
-  const cleanInput = search.trim().replace(/\s/g, '');
-  const isCNIC = /^[0-9]{13}$/.test(cleanInput);
-  const isPhone = /^03[0-9]{9}$/.test(cleanInput);
+  // --- CLEAN INPUT (Remove spaces, dashes, plus signs, parentheses) ---
+  let cleanInput = search.trim()
+    .replace(/\s/g, '')           // Remove spaces
+    .replace(/-/g, '')            // Remove dashes
+    .replace(/\(/g, '')           // Remove opening parentheses
+    .replace(/\)/g, '')           // Remove closing parentheses
+    .replace(/\+/g, '');          // Remove plus sign
 
+  // --- AUTO-DETECT LOGIC (Flexible) ---
+
+  // 1. Check if it's a CNIC (13 digits, with or without dashes)
+  //    Also handle 5-7-1 format: 36402-1274585-1
+  const cnicMatch = cleanInput.match(/^([0-9]{5})?([0-9]{7})?([0-9]{1})?$/);
+  const isCNIC = /^[0-9]{13}$/.test(cleanInput) || 
+                 /^[0-9]{5}-[0-9]{7}-[0-9]{1}$/.test(search) ||
+                 (cleanInput.length === 13 && /^[0-9]+$/.test(cleanInput));
+
+  // 2. Check if it's a Phone Number (Various formats)
+  //    Formats supported:
+  //    - 03067898007 (11 digits, starts with 03)
+  //    - 3067898007 (10 digits, without 0)
+  //    - 923067898007 (with country code, without +)
+  //    - +923067898007 (with +)
+  //    - 92-306-7898007 (with dashes)
+  let isPhone = false;
+  let phoneNumber = cleanInput;
+
+  // Remove country code if present (92 or 923)
+  if (phoneNumber.startsWith('923')) {
+    phoneNumber = phoneNumber.substring(3); // Remove 923
+  } else if (phoneNumber.startsWith('92')) {
+    phoneNumber = phoneNumber.substring(2); // Remove 92
+  }
+
+  // Check if it's a valid Pakistani phone number
+  if (/^03[0-9]{9}$/.test(phoneNumber)) {
+    isPhone = true;
+  } else if (/^3[0-9]{9}$/.test(phoneNumber)) {
+    // If number starts with 3 (without 0), add 0
+    phoneNumber = '0' + phoneNumber;
+    isPhone = true;
+  } else if (/^[0-9]{10}$/.test(phoneNumber) && phoneNumber.startsWith('3')) {
+    // If 10 digits starting with 3
+    phoneNumber = '0' + phoneNumber;
+    isPhone = true;
+  }
+
+  // Final validation
   if (!isCNIC && !isPhone) {
     return res.status(400).json({
       success: false,
@@ -33,9 +76,12 @@ export default async function handler(req, res) {
     // Build target URL
     let targetUrl;
     if (isCNIC) {
-      targetUrl = `https://adeel.app/api/search?cnic=${encodeURIComponent(cleanInput)}`;
+      // Use clean 13-digit CNIC
+      const cnic = cleanInput.replace(/-/g, '');
+      targetUrl = `https://adeel.app/api/search?cnic=${encodeURIComponent(cnic)}`;
     } else if (isPhone) {
-      targetUrl = `https://adeel.app/api/search?phone=${encodeURIComponent(cleanInput)}`;
+      // Use formatted phone number (with 0)
+      targetUrl = `https://adeel.app/api/search?phone=${encodeURIComponent(phoneNumber)}`;
     }
 
     // Forward request
@@ -61,7 +107,6 @@ export default async function handler(req, res) {
     const seenMobiles = new Set();
 
     if (Array.isArray(data.data)) {
-      // CNIC search returns array
       formattedData = data.data
         .filter(item => {
           const mobile = item.Mobile || '';
@@ -78,7 +123,6 @@ export default async function handler(req, res) {
           Address: item.ADDRESS || 'N/A'
         }));
     } else if (data.data && typeof data.data === 'object') {
-      // Phone search returns single object
       const item = data.data;
       formattedData = {
         Name: item.Name || 'N/A',
@@ -90,20 +134,20 @@ export default async function handler(req, res) {
       formattedData = data.data || null;
     }
 
-    // --- ADD CREDIT (Always at the end) ---
+    // --- ADD CREDIT ---
     const credit = {
       credit: "AZ Tricks",
       telegram: "https://t.me/AZ_Tricks"
     };
 
-    // Final response structure
+    // Final response
     const finalResponse = {
       success: data.success || true,
       query: data.query || search,
       type: data.type || (isCNIC ? 'cnic' : 'phone'),
       total: Array.isArray(formattedData) ? formattedData.length : 1,
       data: formattedData,
-      ...credit  // Credit added at the end
+      ...credit
     };
 
     return res.status(200).json(finalResponse);
@@ -116,4 +160,4 @@ export default async function handler(req, res) {
       message: error.message
     });
   }
-        }
+          }
