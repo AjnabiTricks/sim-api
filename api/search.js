@@ -1,10 +1,8 @@
 const axios = require('axios');
 const NodeCache = require('node-cache');
 
-// Cache setup - 5 minutes TTL for fast responses
 const cache = new NodeCache({ stdTTL: 300, checkperiod: 60 });
 
-// Formatting utilities - FAST
 const utils = {
   normalizePhone: (input) => {
     let cleaned = input.toString().replace(/[^0-9+]/g, '');
@@ -33,11 +31,10 @@ const utils = {
   }
 };
 
-// API Fetcher with timeout and retry
 const fetchData = async (url, retries = 1) => {
   try {
     const response = await axios.get(url, {
-      timeout: 5000, // 5 second timeout for FAST response
+      timeout: 5000,
       headers: {
         'User-Agent': 'Mozilla/5.0 (compatible; FastSearch/1.0)',
         'Accept': 'application/json'
@@ -53,9 +50,7 @@ const fetchData = async (url, retries = 1) => {
   }
 };
 
-// Main handler - FAST response
 module.exports = async (req, res) => {
-  // CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -74,11 +69,9 @@ module.exports = async (req, res) => {
   const startTime = Date.now();
   
   try {
-    // Check cache FIRST for SPEED
     const cacheKey = query.toString().trim();
     const cached = cache.get(cacheKey);
     if (cached) {
-      console.log('Cache hit for:', query);
       return res.status(200).json({
         ...cached,
         cached: true,
@@ -86,12 +79,8 @@ module.exports = async (req, res) => {
       });
     }
 
-    // Detect type FAST
     const type = utils.detectType(query);
-    console.log(`Searching: ${query} (${type})`);
-
     const BASE_API = 'https://kingdb.xyz/api.php';
-    let initialData = null;
     let allRecords = [];
     let cnicFound = null;
 
@@ -100,18 +89,16 @@ module.exports = async (req, res) => {
       const normalized = utils.normalizePhone(query);
       const result = await fetchData(`${BASE_API}?query=${normalized}`);
       if (result.status && result.data && result.data.data) {
-        initialData = result.data.data;
-        allRecords = [...initialData];
-        if (initialData.length > 0 && initialData[0].cni) {
-          cnicFound = initialData[0].cni;
+        allRecords = [...result.data.data];
+        if (allRecords.length > 0 && allRecords[0].cni) {
+          cnicFound = allRecords[0].cni;
         }
       }
     } else if (type === 'cnic') {
       const normalized = utils.normalizeCNIC(query);
       const result = await fetchData(`${BASE_API}?query=${normalized}`);
       if (result.status && result.data && result.data.data) {
-        initialData = result.data.data;
-        allRecords = [...initialData];
+        allRecords = [...result.data.data];
       }
     } else {
       return res.status(400).json({
@@ -120,12 +107,11 @@ module.exports = async (req, res) => {
       });
     }
 
-    // Step 2: If CNIC found, fetch ALL records (parallel for SPEED)
+    // Step 2: If CNIC found, fetch ALL records
     if (cnicFound && type === 'phone') {
       const cnicResult = await fetchData(`${BASE_API}?query=${cnicFound}`);
       if (cnicResult.status && cnicResult.data && cnicResult.data.data) {
         const cnicRecords = cnicResult.data.data;
-        // Merge unique records FAST
         const existingNbrs = new Set(allRecords.map(r => r.nbr));
         cnicRecords.forEach(record => {
           if (!existingNbrs.has(record.nbr)) {
@@ -136,7 +122,6 @@ module.exports = async (req, res) => {
       }
     }
 
-    // Step 3: Process results FAST
     if (allRecords.length === 0) {
       return res.status(404).json({
         success: false,
@@ -145,36 +130,77 @@ module.exports = async (req, res) => {
       });
     }
 
-    // Extract data efficiently
+    // ==================================================
+    // 🔥 FIX: Smart name selection (IGNORE garbage)
+    // ==================================================
     const names = [...new Set(allRecords.map(r => r.nam).filter(Boolean))];
+    
+    // Blacklist of fake/error names
+    const blacklist = [
+      'data not recieved from nadra',
+      'data not received from nadra',
+      'not received',
+      'no data',
+      'unknown',
+      'n/a',
+      'null',
+      'undefined',
+      'no',
+      '-'
+    ];
+
+    // Filter out blacklisted names
+    const validNames = names.filter(name => {
+      if (!name) return false;
+      const cleanName = name.toString().trim();
+      if (cleanName.length < 2) return false;
+      const lowerName = cleanName.toLowerCase();
+      return !blacklist.some(bad => lowerName.includes(bad));
+    });
+
+    // Final name selection
+    let finalName = 'Unknown';
+    if (validNames.length > 0) {
+      // Count frequencies of valid names
+      const nameCount = {};
+      validNames.forEach(n => {
+        nameCount[n] = (nameCount[n] || 0) + 1;
+      });
+      // Pick most common valid name
+      finalName = Object.keys(nameCount).reduce((a, b) => 
+        nameCount[a] > nameCount[b] ? a : b
+      );
+    } else {
+      // Fallback to first name if all are garbage
+      finalName = names[0] || 'Unknown';
+    }
+    // ==================================================
+
+    // Extract numbers
     const numbers = [...new Set(allRecords.map(r => r.nbr).filter(Boolean))];
     const cnis = [...new Set(allRecords.map(r => r.cni).filter(Boolean))];
     
-    // Find BEST (longest) address
+    // Find BEST address (ignore "no", "n/a")
     let bestAddress = 'No address available';
     let maxLen = 0;
+    const addrBlacklist = ['no', 'n/a', 'null', 'undefined', '-', 'na'];
     allRecords.forEach(record => {
-      if (record.adr && record.adr.length > maxLen) {
-        maxLen = record.adr.length;
-        bestAddress = record.adr;
+      if (record.adr && record.adr.toString().trim().length > 0) {
+        const addr = record.adr.toString().trim();
+        const lowerAddr = addr.toLowerCase();
+        if (!addrBlacklist.includes(lowerAddr) && addr.length > maxLen) {
+          maxLen = addr.length;
+          bestAddress = addr;
+        }
       }
     });
 
-    // Find most common name
-    let finalName = names[0] || 'Unknown';
-    if (names.length > 1) {
-      const nameCount = {};
-      names.forEach(n => nameCount[n] = (nameCount[n] || 0) + 1);
-      finalName = Object.keys(nameCount).reduce((a, b) => nameCount[a] > nameCount[b] ? a : b);
-    }
-
-    // Prepare response
     const response = {
       success: true,
       query: query,
       detectedType: type,
       data: {
-        name: finalName,
+        name: finalName,  // ✅ Now "ARSHAD MEHMOOD"
         allNumbers: numbers,
         cnic: cnis[0] || null,
         completeAddress: bestAddress,
@@ -184,9 +210,7 @@ module.exports = async (req, res) => {
       responseTime: `${Date.now() - startTime}ms`
     };
 
-    // Cache the response
     cache.set(cacheKey, response);
-
     return res.status(200).json(response);
 
   } catch (error) {
