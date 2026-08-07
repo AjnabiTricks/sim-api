@@ -15,11 +15,5 @@
       "src": "/(.*)",
       "dest": "/api/search.js"
     }
-  ],
-  "functions": {
-    "api/search.js": {
-      "maxDuration": 10,
-      "memory": 1024
-    }
-  }
+  ]
 }
