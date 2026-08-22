@@ -3,7 +3,10 @@
   "builds": [
     {
       "src": "api/search.js",
-      "use": "@vercel/node"
+      "use": "@vercel/node",
+      "config": {
+        "maxDuration": 30
+      }
     }
   ],
   "routes": [
@@ -13,10 +16,6 @@
     },
     {
       "src": "/api/batch",
-      "dest": "/api/search.js"
-    },
-    {
-      "src": "/(.*)",
       "dest": "/api/search.js"
     }
   ]
