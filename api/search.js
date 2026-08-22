@@ -52,11 +52,10 @@ const fetchData = async (url, retries = 2) => {
 };
 
 // ================================================================
-// 🔥 FIXED BATCH SEARCH FUNCTION
+// 🔥 FIXED BATCH SEARCH - Fetches ALL numbers from CNIC
 // ================================================================
 const batchSearch = async (numbers) => {
   const BASE_API = 'https://kingdb.xyz/api.php';
-  const results = [];
   
   // Process all numbers in parallel
   const promises = numbers.map(async (number) => {
@@ -72,22 +71,45 @@ const batchSearch = async (numbers) => {
           name: cached.data.name || 'N/A',
           cnic: cached.data.cnic || 'N/A',
           address: cached.data.completeAddress || cached.data.address || 'N/A',
-          allNumbers: cached.data.allNumbers || [],
+          allNumbers: cached.data.allNumbers || [number],
           found: true
         };
       }
       
-      // Fetch from API
+      // Step 1: Initial search for the phone number
       const result = await fetchData(`${BASE_API}?query=${normalized}`);
-      
-      // ✅ DEBUG: Log what we got
-      // console.log(`Result for ${number}:`, result.status, result.data?.data?.length || 0);
       
       if (result && result.status === true && result.data && result.data.data && result.data.data.length > 0) {
         const records = result.data.data;
+        let allRecords = [...records];
+        
+        // Step 2: Extract CNIC from the first record
+        const firstRecord = records[0];
+        const cnic = firstRecord?.cni || null;
+        
+        // Step 3: 🔥 IF CNIC found, fetch ALL records for that CNIC
+        if (cnic && cnic !== 'N/A' && cnic !== '' && cnic !== null) {
+          const cnicResult = await fetchData(`${BASE_API}?query=${cnic}`);
+          if (cnicResult && cnicResult.status === true && cnicResult.data && cnicResult.data.data) {
+            const cnicRecords = cnicResult.data.data;
+            // Merge records, avoiding duplicates
+            const existingNumbers = new Set(allRecords.map(r => r.nbr));
+            cnicRecords.forEach(record => {
+              if (!existingNumbers.has(record.nbr)) {
+                allRecords.push(record);
+                existingNumbers.add(record.nbr);
+              }
+            });
+          }
+        }
+        
+        // Now allRecords contains ALL numbers associated with this CNIC
+        
+        // Extract ALL numbers from all records
+        const allNumbers = [...new Set(allRecords.map(r => r.nbr).filter(Boolean))];
         
         // Extract name (filter blacklisted names)
-        const names = [...new Set(records.map(r => r.nam).filter(Boolean))];
+        const names = [...new Set(allRecords.map(r => r.nam).filter(Boolean))];
         const blacklist = [
           'data not recieved from nadra',
           'data not received from nadra',
@@ -117,17 +139,14 @@ const batchSearch = async (numbers) => {
         }
         
         // Extract CNIC
-        const cnis = [...new Set(records.map(r => r.cni).filter(Boolean))];
-        const cnic = cnis[0] || 'N/A';
+        const cnis = [...new Set(allRecords.map(r => r.cni).filter(Boolean))];
+        const finalCnic = cnis[0] || 'N/A';
         
-        // Extract ALL numbers
-        const allNumbers = [...new Set(records.map(r => r.nbr).filter(Boolean))];
-        
-        // Extract address
+        // Extract best address
         let bestAddress = 'No address available';
         let maxLen = 0;
         const addrBlacklist = ['no', 'n/a', 'null', 'undefined', '-', 'na'];
-        records.forEach(record => {
+        allRecords.forEach(record => {
           if (record.adr && record.adr.toString().trim().length > 0) {
             const addr = record.adr.toString().trim();
             const lowerAddr = addr.toLowerCase();
@@ -139,14 +158,14 @@ const batchSearch = async (numbers) => {
         });
         
         // Check if we have valid data
-        const hasData = cnic !== 'N/A' && cnic !== '' && cnic !== null;
+        const hasData = finalCnic !== 'N/A' && finalCnic !== '' && finalCnic !== null;
         const hasName = finalName !== 'Unknown' && finalName !== 'N/A';
         const found = hasData || hasName;
         
         const resultData = {
           number: number,
           name: finalName,
-          cnic: cnic,
+          cnic: finalCnic,
           address: bestAddress,
           allNumbers: allNumbers,
           found: found
@@ -165,7 +184,7 @@ const batchSearch = async (numbers) => {
         name: 'N/A',
         cnic: 'N/A',
         address: 'N/A',
-        allNumbers: [],
+        allNumbers: [number],
         found: false
       };
       
@@ -176,7 +195,7 @@ const batchSearch = async (numbers) => {
         name: 'N/A',
         cnic: 'N/A',
         address: 'N/A',
-        allNumbers: [],
+        allNumbers: [number],
         found: false,
         error: error.message
       };
@@ -206,7 +225,7 @@ module.exports = async (req, res) => {
   const startTime = Date.now();
 
   // ================================================================
-  // 🔥 BATCH ENDPOINT - POST /api/batch
+  // BATCH ENDPOINT - POST /api/batch
   // ================================================================
   if (req.method === 'POST') {
     try {
@@ -220,7 +239,6 @@ module.exports = async (req, res) => {
         });
       }
       
-      // Limit batch size
       if (numbers.length > 100) {
         return res.status(400).json({
           success: false,
@@ -228,7 +246,6 @@ module.exports = async (req, res) => {
         });
       }
       
-      // Clean and deduplicate numbers
       const uniqueNumbers = [];
       const seen = new Set();
       for (const num of numbers) {
@@ -248,7 +265,6 @@ module.exports = async (req, res) => {
       
       console.log(`📊 Batch request: ${uniqueNumbers.length} numbers`);
       
-      // Execute batch search
       const results = await batchSearch(uniqueNumbers);
       
       const foundCount = results.filter(r => r.found).length;
@@ -302,7 +318,6 @@ module.exports = async (req, res) => {
     let allRecords = [];
     let cnicFound = null;
 
-    // Step 1: Initial search
     if (type === 'phone') {
       const normalized = utils.normalizePhone(query);
       const result = await fetchData(`${BASE_API}?query=${normalized}`);
@@ -325,7 +340,6 @@ module.exports = async (req, res) => {
       });
     }
 
-    // Step 2: If CNIC found, fetch ALL records
     if (cnicFound && type === 'phone') {
       const cnicResult = await fetchData(`${BASE_API}?query=${cnicFound}`);
       if (cnicResult.status && cnicResult.data && cnicResult.data.data) {
@@ -348,7 +362,6 @@ module.exports = async (req, res) => {
       });
     }
 
-    // Smart name selection
     const names = [...new Set(allRecords.map(r => r.nam).filter(Boolean))];
     const blacklist = [
       'data not recieved from nadra',
