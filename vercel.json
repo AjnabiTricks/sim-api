@@ -12,6 +12,10 @@
       "dest": "/api/search.js"
     },
     {
+      "src": "/api/batch",
+      "dest": "/api/search.js"
+    },
+    {
       "src": "/(.*)",
       "dest": "/api/search.js"
     }
