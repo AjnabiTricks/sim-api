@@ -31,10 +31,10 @@ const utils = {
   }
 };
 
-const fetchData = async (url, retries = 1) => {
+const fetchData = async (url, retries = 2) => {
   try {
     const response = await axios.get(url, {
-      timeout: 5000,
+      timeout: 8000,
       headers: {
         'User-Agent': 'Mozilla/5.0 (compatible; FastSearch/1.0)',
         'Accept': 'application/json'
@@ -43,21 +43,22 @@ const fetchData = async (url, retries = 1) => {
     return response.data;
   } catch (error) {
     if (retries > 0) {
-      await new Promise(resolve => setTimeout(resolve, 200));
+      await new Promise(resolve => setTimeout(resolve, 500));
       return fetchData(url, retries - 1);
     }
+    console.error(`Fetch error for ${url}:`, error.message);
     return { status: false, error: error.message };
   }
 };
 
 // ================================================================
-// 🔥 BATCH SEARCH FUNCTION - Process multiple numbers in parallel
+// 🔥 FIXED BATCH SEARCH FUNCTION
 // ================================================================
 const batchSearch = async (numbers) => {
   const BASE_API = 'https://kingdb.xyz/api.php';
   const results = [];
   
-  // Process all numbers in parallel with Promise.all
+  // Process all numbers in parallel
   const promises = numbers.map(async (number) => {
     try {
       const normalized = utils.normalizePhone(number);
@@ -65,20 +66,24 @@ const batchSearch = async (numbers) => {
       
       // Check cache first
       const cached = cache.get(cacheKey);
-      if (cached && cached.data) {
+      if (cached && cached.data && cached.data.cnic && cached.data.cnic !== 'N/A') {
         return {
           number: number,
           name: cached.data.name || 'N/A',
           cnic: cached.data.cnic || 'N/A',
           address: cached.data.completeAddress || cached.data.address || 'N/A',
-          found: cached.data.cnic && cached.data.cnic !== 'N/A' && cached.data.cnic !== ''
+          allNumbers: cached.data.allNumbers || [],
+          found: true
         };
       }
       
       // Fetch from API
       const result = await fetchData(`${BASE_API}?query=${normalized}`);
       
-      if (result.status && result.data && result.data.data && result.data.data.length > 0) {
+      // ✅ DEBUG: Log what we got
+      // console.log(`Result for ${number}:`, result.status, result.data?.data?.length || 0);
+      
+      if (result && result.status === true && result.data && result.data.data && result.data.data.length > 0) {
         const records = result.data.data;
         
         // Extract name (filter blacklisted names)
@@ -115,6 +120,9 @@ const batchSearch = async (numbers) => {
         const cnis = [...new Set(records.map(r => r.cni).filter(Boolean))];
         const cnic = cnis[0] || 'N/A';
         
+        // Extract ALL numbers
+        const allNumbers = [...new Set(records.map(r => r.nbr).filter(Boolean))];
+        
         // Extract address
         let bestAddress = 'No address available';
         let maxLen = 0;
@@ -130,34 +138,45 @@ const batchSearch = async (numbers) => {
           }
         });
         
-        const hasCnic = cnic !== 'N/A' && cnic !== '';
+        // Check if we have valid data
+        const hasData = cnic !== 'N/A' && cnic !== '' && cnic !== null;
+        const hasName = finalName !== 'Unknown' && finalName !== 'N/A';
+        const found = hasData || hasName;
+        
         const resultData = {
           number: number,
           name: finalName,
           cnic: cnic,
           address: bestAddress,
-          found: hasCnic
+          allNumbers: allNumbers,
+          found: found
         };
         
-        // Cache the result
-        cache.set(cacheKey, { data: resultData });
+        // Cache the result if found
+        if (found) {
+          cache.set(cacheKey, { data: resultData });
+        }
         return resultData;
       }
       
+      // No data found
       return {
         number: number,
         name: 'N/A',
         cnic: 'N/A',
         address: 'N/A',
+        allNumbers: [],
         found: false
       };
       
     } catch (error) {
+      console.error(`Error processing ${number}:`, error);
       return {
         number: number,
         name: 'N/A',
         cnic: 'N/A',
         address: 'N/A',
+        allNumbers: [],
         found: false,
         error: error.message
       };
@@ -165,7 +184,13 @@ const batchSearch = async (numbers) => {
   });
   
   // Wait for all promises to complete
-  return await Promise.all(promises);
+  const results_array = await Promise.all(promises);
+  
+  // Log summary
+  const foundCount = results_array.filter(r => r.found).length;
+  console.log(`✅ Batch complete: ${foundCount}/${results_array.length} found`);
+  
+  return results_array;
 };
 
 // ================================================================
@@ -195,7 +220,7 @@ module.exports = async (req, res) => {
         });
       }
       
-      // Limit batch size to prevent abuse
+      // Limit batch size
       if (numbers.length > 100) {
         return res.status(400).json({
           success: false,
@@ -221,10 +246,14 @@ module.exports = async (req, res) => {
         });
       }
       
+      console.log(`📊 Batch request: ${uniqueNumbers.length} numbers`);
+      
       // Execute batch search
       const results = await batchSearch(uniqueNumbers);
       
       const foundCount = results.filter(r => r.found).length;
+      
+      console.log(`✅ Batch response: ${foundCount} found, ${results.length - foundCount} not found`);
       
       return res.status(200).json({
         success: true,
@@ -319,11 +348,8 @@ module.exports = async (req, res) => {
       });
     }
 
-    // ==================================================
-    // 🔥 FIX: Smart name selection (IGNORE garbage)
-    // ==================================================
+    // Smart name selection
     const names = [...new Set(allRecords.map(r => r.nam).filter(Boolean))];
-    
     const blacklist = [
       'data not recieved from nadra',
       'data not received from nadra',
