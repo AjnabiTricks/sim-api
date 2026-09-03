@@ -84,31 +84,22 @@ export default async function handler(req, res) {
 
     const html = await paksimResponse.text();
     
-    // --- DEBUG: Log HTML ---
     console.log(`📄 HTML Length: ${html.length}`);
-    console.log(`📄 HTML Preview (first 1000 chars):\n${html.substring(0, 1000)}...`);
 
-    // --- PARSE HTML using multiple methods ---
+    // --- PARSE HTML ---
     let parsedData = parsePaksimHTML(html);
     
-    // If first method fails, try alternative
     if (!parsedData || parsedData.length === 0) {
-      console.log('⚠️ Primary parsing failed, trying alternative method...');
       parsedData = parsePaksimHTMLAlt(html);
     }
 
     console.log(`📊 Parsed Data Count: ${parsedData ? parsedData.length : 0}`);
 
     if (!parsedData || parsedData.length === 0) {
-      // Return HTML snippet for debugging
       return res.status(404).json({
         success: false,
         error: 'No data found for this phone number',
-        query: phoneNumber,
-        debug: {
-          htmlLength: html.length,
-          htmlSnippet: html.substring(0, 500)
-        }
+        query: phoneNumber
       });
     }
 
@@ -123,24 +114,131 @@ export default async function handler(req, res) {
       return false;
     });
 
-    // --- FORMAT RESPONSE ---
-    let formattedData;
-    if (uniqueData.length === 1) {
-      const item = uniqueData[0];
-      formattedData = {
-        Name: item.Name,
-        Cnic: item.Cnic,
-        Mobile: item.Mobile,
-        Address: item.Address
-      };
-    } else {
-      formattedData = uniqueData.map(item => ({
-        Name: item.Name,
-        Cnic: item.Cnic,
-        Mobile: item.Mobile,
-        Address: item.Address
-      }));
+    // =============================================
+    // 🔥 SMART NAME FILTER - IGNORE GARBAGE
+    // =============================================
+    function getSmartName(records) {
+      const garbageNames = [
+        'data not recieved from nadra',
+        'data not received from nadra',
+        'not received from nadra',
+        'not recieved from nadra',
+        'data not recieved',
+        'data not received',
+        'not received',
+        'no data',
+        'unknown',
+        'n/a',
+        'null',
+        'undefined',
+        'no',
+        '-',
+        'data not recieved from'
+      ];
+      
+      const names = records
+        .map(r => r.Name)
+        .filter(name => name && name.toString().trim().length > 0)
+        .map(name => name.toString().trim());
+      
+      if (names.length === 0) return 'Unknown';
+      
+      const validNames = names.filter(name => {
+        const lower = name.toLowerCase();
+        return !garbageNames.some(garbage => lower.includes(garbage));
+      });
+      
+      if (validNames.length === 0) {
+        return names[0];
+      }
+      
+      const nameCount = {};
+      validNames.forEach(name => {
+        nameCount[name] = (nameCount[name] || 0) + 1;
+      });
+      
+      let mostCommon = validNames[0];
+      let maxCount = 0;
+      Object.keys(nameCount).forEach(name => {
+        if (nameCount[name] > maxCount) {
+          maxCount = nameCount[name];
+          mostCommon = name;
+        }
+      });
+      
+      return mostCommon;
     }
+
+    // =============================================
+    // 🏠 SMART ADDRESS FILTER
+    // =============================================
+    function getSmartAddress(records) {
+      const garbageAddresses = ['no', 'n/a', 'null', 'undefined', '-', 'na', 'no address', 'nill'];
+      
+      let bestAddress = 'No address available';
+      let maxLength = 0;
+      
+      records.forEach(record => {
+        if (record.Address && record.Address.toString().trim().length > 0) {
+          const addr = record.Address.toString().trim();
+          const lower = addr.toLowerCase();
+          
+          if (garbageAddresses.includes(lower)) return;
+          
+          if (addr.length > maxLength) {
+            maxLength = addr.length;
+            bestAddress = addr;
+          }
+        }
+      });
+      
+      return bestAddress;
+    }
+
+    // =============================================
+    // 📊 EXTRACT ALL NUMBERS & CNICS
+    // =============================================
+    function getAllNumbers(records) {
+      const numbers = records
+        .map(r => r.Mobile)
+        .filter(n => n && n.toString().trim().length > 0)
+        .map(n => n.toString().trim());
+      return [...new Set(numbers)];
+    }
+
+    function getAllCNICs(records) {
+      const cnis = records
+        .map(r => r.Cnic)
+        .filter(c => c && c.toString().trim().length > 0)
+        .map(c => c.toString().trim());
+      return [...new Set(cnis)];
+    }
+
+    // =============================================
+    // ✅ APPLY FILTERS
+    // =============================================
+    const finalName = getSmartName(uniqueData);
+    const bestAddress = getSmartAddress(uniqueData);
+    const allNumbers = getAllNumbers(uniqueData);
+    const allCNICs = getAllCNICs(uniqueData);
+
+    // =============================================
+    // 📦 FORMAT FINAL RESPONSE
+    // =============================================
+    const formattedData = {
+      name: finalName,
+      allNumbers: allNumbers,
+      cnic: allCNICs[0] || null,
+      allCNICs: allCNICs,
+      completeAddress: bestAddress,
+      totalRecords: uniqueData.length,
+      records: uniqueData.map(item => ({
+        name: item.Name,
+        cnic: item.Cnic,
+        number: item.Mobile,
+        address: item.Address
+      }))
+    };
 
     // --- CREDIT ---
     const credit = {
@@ -153,7 +251,6 @@ export default async function handler(req, res) {
       success: true,
       query: phoneNumber,
       type: 'phone',
-      total: uniqueData.length,
       data: formattedData,
       ...credit
     };
@@ -175,7 +272,6 @@ function parsePaksimHTML(html) {
   try {
     const results = [];
     
-    // Find table
     const tableStart = html.indexOf('<table');
     const tableEnd = html.indexOf('</table>', tableStart);
     
@@ -186,7 +282,6 @@ function parsePaksimHTML(html) {
 
     const tableHTML = html.substring(tableStart, tableEnd + 8);
     
-    // Extract rows
     const rowRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
     const cellRegex = /<td[^>]*>([\s\S]*?)<\/td>/gi;
     
@@ -229,12 +324,11 @@ function parsePaksimHTML(html) {
   }
 }
 
-// --- METHOD 2: Alternative parsing (simple string split) ---
+// --- METHOD 2: Alternative parsing ---
 function parsePaksimHTMLAlt(html) {
   try {
     const results = [];
     
-    // Look for pattern: <td>Name</td><td>CNIC</td><td>Mobile</td><td>Address</td>
     const tdRegex = /<td[^>]*>([\s\S]*?)<\/td>/gi;
     const allCells = [];
     let match;
@@ -250,7 +344,6 @@ function parsePaksimHTMLAlt(html) {
       }
     }
     
-    // Group cells into records (4 cells per record)
     for (let i = 0; i < allCells.length; i += 4) {
       if (i + 3 < allCells.length) {
         results.push({
@@ -267,4 +360,4 @@ function parsePaksimHTMLAlt(html) {
     console.error('Alt parse error:', error);
     return null;
   }
-}
+        }
