@@ -45,31 +45,19 @@ export default async function handler(req, res) {
     console.log(`🔍 Searching for: ${phoneNumber}`);
 
     // =============================================
-    // 📞 SEARCH FUNCTION WITH DELAY & ROTATING UA
+    // 📞 SEARCH FUNCTION
     // =============================================
     async function searchData(query, retryCount = 0) {
-      // ⏰ Add delay to avoid rate limiting
       if (retryCount > 0) {
-        await new Promise(resolve => setTimeout(resolve, 3000 * retryCount));
+        await new Promise(resolve => setTimeout(resolve, 2000 * retryCount));
       }
-      
-      // 🔄 Rotate user agents
-      const userAgents = [
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0',
-        'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
-        'Mozilla/5.0 (Linux; Android 13; SM-G998B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36'
-      ];
-      
-      const randomUA = userAgents[Math.floor(Math.random() * userAgents.length)];
       
       try {
         const response = await fetch('https://paksim.info/sim-database-online-2022-result.php', {
           method: 'POST',
           headers: {
             'content-type': 'application/x-www-form-urlencoded',
-            'user-agent': randomUA,
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'origin': 'https://paksim.info',
             'referer': 'https://paksim.info/search.php',
             'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
@@ -77,59 +65,28 @@ export default async function handler(req, res) {
             'cache-control': 'max-age=0',
             'sec-ch-ua': '"Not(A:Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
             'sec-ch-ua-mobile': '?0',
-            'sec-ch-ua-platform': '"Windows"',
-            'sec-fetch-site': 'same-origin',
-            'sec-fetch-mode': 'navigate',
-            'sec-fetch-user': '?1',
-            'sec-fetch-dest': 'document',
-            'upgrade-insecure-requests': '1',
-            'priority': 'u=0, i'
+            'sec-ch-ua-platform': '"Windows"'
           },
           body: new URLSearchParams({ cnnum: query })
         });
 
         if (!response.ok) {
           console.log(`HTTP Error: ${response.status}`);
-          if (response.status === 429 || response.status === 403) {
-            // Rate limited - retry with longer delay
-            if (retryCount < 3) {
-              console.log(`⚠️ Rate limited, retrying... (${retryCount + 1})`);
-              return searchData(query, retryCount + 1);
-            }
-          }
           return [];
         }
 
         const html = await response.text();
         console.log(`📄 HTML Length: ${html.length}`);
         
-        // Check if "No record found" message exists
-        if (html.includes('No record found') || html.includes('No data found') || html.includes('not found')) {
-          console.log('⚠️ Paksim says: No record found');
+        if (html.includes('No record found') || html.includes('No data found')) {
+          console.log('⚠️ No record found');
           return [];
         }
         
-        // Check if blocked
-        if (html.includes('blocked') || html.includes('security') || html.includes('captcha')) {
-          console.log('🚫 Paksim blocked the request');
-          if (retryCount < 3) {
-            await new Promise(resolve => setTimeout(resolve, 5000));
-            return searchData(query, retryCount + 1);
-          }
-          return [];
-        }
-        
-        const parsed = parsePaksimHTML(html);
-        console.log(`✅ Parsed ${parsed.length} records`);
-        return parsed;
+        return parsePaksimHTML(html);
         
       } catch (error) {
         console.error('Search error:', error);
-        if (retryCount < 2) {
-          console.log(`🔄 Retrying... (${retryCount + 1})`);
-          await new Promise(resolve => setTimeout(resolve, 2000));
-          return searchData(query, retryCount + 1);
-        }
         return [];
       }
     }
@@ -176,9 +133,8 @@ export default async function handler(req, res) {
     if (!allRecords || allRecords.length === 0) {
       return res.status(404).json({
         success: false,
-        error: 'No data found. Try another number or wait a few minutes.',
-        query: search,
-        suggestion: 'Paksim.info might be rate limiting. Try after 2-3 minutes.'
+        error: 'No data found. Try another number.',
+        query: search
       });
     }
 
@@ -193,11 +149,19 @@ export default async function handler(req, res) {
       return false;
     });
 
+    console.log('📊 Unique Records:', JSON.stringify(uniqueData, null, 2));
+
+    // =============================================
+    // 🔥 SMART FILTERS
+    // =============================================
     const finalName = getSmartName(uniqueData);
     const bestAddress = getSmartAddress(uniqueData);
     const allNumbers = getAllNumbers(uniqueData);
     const allCNICs = getAllCNICs(uniqueData);
 
+    // =============================================
+    // 📦 FINAL RESPONSE
+    // =============================================
     const finalResponse = {
       success: true,
       query: isCNIC ? cleanInput : phoneNumber,
@@ -233,85 +197,84 @@ export default async function handler(req, res) {
 }
 
 // =============================================
-// 🔧 PARSER FUNCTIONS (same as before)
+// 🔧 FIXED PARSER - Correct Column Mapping
 // =============================================
 function parsePaksimHTML(html) {
   try {
     const results = [];
     
-    // Method 1: Table parsing
-    const tableRegex = /<table[^>]*>([\s\S]*?)<\/table>/i;
-    const tableMatch = html.match(tableRegex);
+    // Find the table
+    const tableStart = html.indexOf('<table');
+    const tableEnd = html.indexOf('</table>', tableStart);
     
-    if (tableMatch) {
-      const tableHTML = tableMatch[1];
-      const rowRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
-      const cellRegex = /<td[^>]*>([\s\S]*?)<\/td>/gi;
+    if (tableStart === -1 || tableEnd === -1) {
+      console.log('❌ No table found');
+      return results;
+    }
+
+    const tableHTML = html.substring(tableStart, tableEnd + 8);
+    
+    // Extract rows
+    const rowRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+    const cellRegex = /<td[^>]*>([\s\S]*?)<\/td>/gi;
+    
+    let rowMatch;
+    let isHeader = true;
+    let rowNumber = 0;
+    
+    while ((rowMatch = rowRegex.exec(tableHTML)) !== null) {
+      rowNumber++;
       
-      let rowMatch;
-      let isHeader = true;
+      // Skip header row
+      if (isHeader) {
+        isHeader = false;
+        continue;
+      }
       
-      while ((rowMatch = rowRegex.exec(tableHTML)) !== null) {
-        if (isHeader) {
-          isHeader = false;
-          continue;
-        }
+      const row = rowMatch[1];
+      const cells = [];
+      let cellMatch;
+      
+      while ((cellMatch = cellRegex.exec(row)) !== null) {
+        let content = cellMatch[1]
+          .replace(/<[^>]*>/g, '')
+          .replace(/&nbsp;/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+        cells.push(content);
+      }
+      
+      console.log(`Row ${rowNumber} cells:`, cells);
+      
+      // Check if we have at least 4 cells
+      if (cells.length >= 4) {
+        // Clean each field
+        const name = cells[0] || 'N/A';
+        const cnic = cells[1] || 'N/A';
+        const mobile = cells[2] || 'N/A';
+        const address = cells[3] || 'N/A';
         
-        const cells = [];
-        let cellMatch;
-        while ((cellMatch = cellRegex.exec(rowMatch[1])) !== null) {
-          let content = cellMatch[1]
-            .replace(/<[^>]*>/g, '')
-            .replace(/&nbsp;/g, ' ')
-            .replace(/\s+/g, ' ')
-            .trim();
-          cells.push(content);
-        }
-        
-        if (cells.length >= 4) {
+        // Filter out header-like data
+        if (name && 
+            name !== 'Name' && 
+            name !== 'CNIC' && 
+            name !== 'MobileNo' && 
+            name !== 'Address' &&
+            name !== 'Mobile' &&
+            name !== 'S.No' &&
+            !name.includes('search')) {
+          
           results.push({
-            Name: cells[0] || 'N/A',
-            Cnic: cells[1] || 'N/A',
-            Mobile: cells[2] || 'N/A',
-            Address: cells[3] || 'N/A'
+            Name: name,
+            Cnic: cnic,
+            Mobile: mobile,
+            Address: address
           });
         }
       }
-      
-      if (results.length > 0) {
-        console.log(`✅ Table parser found ${results.length} records`);
-        return results;
-      }
-    }
-
-    // Method 2: Alternative parsing
-    const tdRegex = /<td[^>]*>([\s\S]*?)<\/td>/gi;
-    const allCells = [];
-    let match;
-    
-    while ((match = tdRegex.exec(html)) !== null) {
-      let content = match[1]
-        .replace(/<[^>]*>/g, '')
-        .replace(/&nbsp;/g, ' ')
-        .replace(/\s+/g, ' ')
-        .trim();
-      if (content) {
-        allCells.push(content);
-      }
     }
     
-    for (let i = 0; i < allCells.length; i += 4) {
-      if (i + 3 < allCells.length) {
-        results.push({
-          Name: allCells[i] || 'N/A',
-          Cnic: allCells[i+1] || 'N/A',
-          Mobile: allCells[i+2] || 'N/A',
-          Address: allCells[i+3] || 'N/A'
-        });
-      }
-    }
-    
-    console.log(`✅ Alternative parser found ${results.length} records`);
+    console.log(`✅ Parser found ${results.length} valid records`);
     return results;
     
   } catch (error) {
@@ -320,17 +283,58 @@ function parsePaksimHTML(html) {
   }
 }
 
+// =============================================
+// 🔧 HELPER FUNCTIONS
+// =============================================
 function getSmartName(records) {
-  const garbage = ['data not recieved from nadra', 'data not received from nadra', 'not received', 'no data', 'unknown', 'n/a', 'null', 'undefined', 'no', '-'];
-  const names = records.map(r => r.Name).filter(n => n && n.trim().length > 0).map(n => n.trim());
+  const garbage = [
+    'data not recieved from nadra', 
+    'data not received from nadra', 
+    'not received', 
+    'no data', 
+    'unknown', 
+    'n/a', 
+    'null', 
+    'undefined', 
+    'no', 
+    '-',
+    'cnic',
+    'mobile',
+    'address',
+    'search'
+  ];
+  
+  const names = records
+    .map(r => r.Name)
+    .filter(n => n && n.toString().trim().length > 0)
+    .map(n => n.toString().trim());
+  
   if (names.length === 0) return 'Unknown';
   
-  const valid = names.filter(n => !garbage.some(g => n.toLowerCase().includes(g)));
-  if (valid.length === 0) return names[0];
+  const validNames = names.filter(name => {
+    const lower = name.toLowerCase();
+    return !garbage.some(g => lower.includes(g));
+  });
   
-  const count = {};
-  valid.forEach(n => count[n] = (count[n] || 0) + 1);
-  return Object.keys(count).reduce((a, b) => count[a] > count[b] ? a : b);
+  if (validNames.length === 0) {
+    return names[0];
+  }
+  
+  const nameCount = {};
+  validNames.forEach(name => {
+    nameCount[name] = (nameCount[name] || 0) + 1;
+  });
+  
+  let mostCommon = validNames[0];
+  let maxCount = 0;
+  Object.keys(nameCount).forEach(name => {
+    if (nameCount[name] > maxCount) {
+      maxCount = nameCount[name];
+      mostCommon = name;
+    }
+  });
+  
+  return mostCommon;
 }
 
 function getSmartAddress(records) {
@@ -339,23 +343,32 @@ function getSmartAddress(records) {
   let maxLen = 0;
   
   records.forEach(r => {
-    if (r.Address && r.Address.trim().length > 0) {
-      const addr = r.Address.trim();
-      if (!garbage.includes(addr.toLowerCase()) && addr.length > maxLen) {
+    if (r.Address && r.Address.toString().trim().length > 0) {
+      const addr = r.Address.toString().trim();
+      const lower = addr.toLowerCase();
+      
+      if (!garbage.includes(lower) && addr.length > maxLen) {
         maxLen = addr.length;
         best = addr;
       }
     }
   });
+  
   return best;
 }
 
 function getAllNumbers(records) {
-  const numbers = records.map(r => r.Mobile).filter(n => n && n.trim().length > 0).map(n => n.trim());
+  const numbers = records
+    .map(r => r.Mobile)
+    .filter(n => n && n.toString().trim().length > 0)
+    .map(n => n.toString().trim());
   return [...new Set(numbers)];
 }
 
 function getAllCNICs(records) {
-  const cnis = records.map(r => r.Cnic).filter(c => c && c.trim().length > 0).map(c => c.trim());
+  const cnis = records
+    .map(r => r.Cnic)
+    .filter(c => c && c.toString().trim().length > 0)
+    .map(c => c.toString().trim());
   return [...new Set(cnis)];
-      }
+            }
