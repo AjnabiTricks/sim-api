@@ -1,460 +1,217 @@
-const axios = require('axios');
-const NodeCache = require('node-cache');
-
-const cache = new NodeCache({ stdTTL: 600, checkperiod: 120 }); // Increased cache to 10 minutes
-
-const utils = {
-  normalizePhone: (input) => {
-    let cleaned = input.toString().replace(/[^0-9+]/g, '');
-    if (cleaned.startsWith('+92')) return cleaned.substring(1);
-    if (cleaned.startsWith('0092')) return cleaned.substring(4);
-    if (cleaned.startsWith('92')) return cleaned;
-    if (cleaned.startsWith('0')) return '92' + cleaned.substring(1);
-    if (cleaned.length === 10 && cleaned.startsWith('3')) return '92' + cleaned;
-    return cleaned;
-  },
-  
-  normalizeCNIC: (input) => {
-    let cleaned = input.toString().replace(/[^0-9]/g, '');
-    if (cleaned.length === 13) return cleaned;
-    if (cleaned.length === 12) return '0' + cleaned;
-    return cleaned;
-  },
-  
-  detectType: (input) => {
-    const cleaned = input.toString().replace(/[^0-9+]/g, '');
-    const numeric = cleaned.replace(/[^0-9]/g, '');
-    if (numeric.length === 13 && !cleaned.includes('+')) return 'cnic';
-    if (numeric.length >= 10 && numeric.length <= 12) return 'phone';
-    if (cleaned.includes('+')) return 'phone';
-    return 'unknown';
-  }
-};
-
-// 🔥 FIX: Increased timeout and retries
-const fetchData = async (url, retries = 3) => {
-  for (let attempt = 0; attempt < retries; attempt++) {
-    try {
-      const response = await axios.get(url, {
-        timeout: 15000, // 15 seconds timeout
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (compatible; FastSearch/1.0)',
-          'Accept': 'application/json'
-        }
-      });
-      return response.data;
-    } catch (error) {
-      if (attempt < retries - 1) {
-        const delay = (attempt + 1) * 500; // Progressive delay: 500ms, 1000ms, 1500ms
-        console.log(`Retry ${attempt + 1}/${retries} for ${url} (${delay}ms delay)`);
-        await new Promise(resolve => setTimeout(resolve, delay));
-      } else {
-        console.error(`Fetch error for ${url}:`, error.message);
-        return { status: false, error: error.message };
-      }
-    }
-  }
-};
-
-// ================================================================
-// 🔥 OPTIMIZED BATCH SEARCH WITH BETTER CONCURRENCY
-// ================================================================
-const batchSearch = async (numbers) => {
-  const BASE_API = 'https://kingdb.xyz/api.php';
-  const CONCURRENCY = 20; // Process 20 numbers at a time
-  const allResults = [];
-  let foundCount = 0;
-  let processedCount = 0;
-  
-  console.log(`📊 Starting batch search for ${numbers.length} numbers`);
-  
-  // Process in chunks to avoid overwhelming the API
-  for (let i = 0; i < numbers.length; i += CONCURRENCY) {
-    const chunk = numbers.slice(i, i + CONCURRENCY);
-    
-    // Process chunk in parallel
-    const chunkPromises = chunk.map(async (number) => {
-      try {
-        const normalized = utils.normalizePhone(number);
-        const cacheKey = normalized.toString().trim();
-        
-        // Check cache first
-        const cached = cache.get(cacheKey);
-        if (cached && cached.data) {
-          processedCount++;
-          return cached.data;
-        }
-        
-        // Step 1: Search phone number
-        const result = await fetchData(`${BASE_API}?query=${normalized}`);
-        
-        if (result && result.status === true && result.data && result.data.data && result.data.data.length > 0) {
-          const records = result.data.data;
-          let allRecords = [...records];
-          
-          // Step 2: Get CNIC and fetch all records
-          const firstRecord = records[0];
-          const cnic = firstRecord?.cni || null;
-          
-          if (cnic && cnic !== 'N/A' && cnic !== '' && cnic !== null) {
-            const cnicResult = await fetchData(`${BASE_API}?query=${cnic}`);
-            if (cnicResult && cnicResult.status === true && cnicResult.data && cnicResult.data.data) {
-              const cnicRecords = cnicResult.data.data;
-              const existingNumbers = new Set(allRecords.map(r => r.nbr));
-              cnicRecords.forEach(record => {
-                if (!existingNumbers.has(record.nbr)) {
-                  allRecords.push(record);
-                  existingNumbers.add(record.nbr);
-                }
-              });
-            }
-          }
-          
-          // Extract all numbers
-          const allNumbers = [...new Set(allRecords.map(r => r.nbr).filter(Boolean))];
-          
-          // Extract best name
-          const names = [...new Set(allRecords.map(r => r.nam).filter(Boolean))];
-          const blacklist = [
-            'data not recieved from nadra',
-            'data not received from nadra',
-            'not received',
-            'no data',
-            'unknown',
-            'n/a',
-            'null',
-            'undefined',
-            'no',
-            '-'
-          ];
-          const validNames = names.filter(name => {
-            if (!name) return false;
-            const cleanName = name.toString().trim();
-            if (cleanName.length < 2) return false;
-            const lowerName = cleanName.toLowerCase();
-            return !blacklist.some(bad => lowerName.includes(bad));
-          });
-          
-          let finalName = 'Unknown';
-          if (validNames.length > 0) {
-            const nameCount = {};
-            validNames.forEach(n => { nameCount[n] = (nameCount[n] || 0) + 1; });
-            finalName = Object.keys(nameCount).reduce((a, b) => nameCount[a] > nameCount[b] ? a : b);
-          } else {
-            finalName = names[0] || 'Unknown';
-          }
-          
-          // Extract CNIC
-          const cnis = [...new Set(allRecords.map(r => r.cni).filter(Boolean))];
-          const finalCnic = cnis[0] || 'N/A';
-          
-          // Extract best address
-          let bestAddress = 'No address available';
-          let maxLen = 0;
-          const addrBlacklist = ['no', 'n/a', 'null', 'undefined', '-', 'na'];
-          allRecords.forEach(record => {
-            if (record.adr && record.adr.toString().trim().length > 0) {
-              const addr = record.adr.toString().trim();
-              const lowerAddr = addr.toLowerCase();
-              if (!addrBlacklist.includes(lowerAddr) && addr.length > maxLen) {
-                maxLen = addr.length;
-                bestAddress = addr;
-              }
-            }
-          });
-          
-          const hasData = finalCnic !== 'N/A' && finalCnic !== '' && finalCnic !== null;
-          const found = hasData || finalName !== 'Unknown';
-          
-          const resultData = {
-            number: number,
-            name: finalName,
-            cnic: finalCnic,
-            address: bestAddress,
-            allNumbers: allNumbers,
-            found: found
-          };
-          
-          // Cache the result
-          if (found) {
-            cache.set(cacheKey, { data: resultData });
-          }
-          
-          processedCount++;
-          return resultData;
-        }
-        
-        // No data found
-        processedCount++;
-        return {
-          number: number,
-          name: 'N/A',
-          cnic: 'N/A',
-          address: 'N/A',
-          allNumbers: [number],
-          found: false
-        };
-        
-      } catch (error) {
-        console.error(`Error processing ${number}:`, error);
-        processedCount++;
-        return {
-          number: number,
-          name: 'N/A',
-          cnic: 'N/A',
-          address: 'N/A',
-          allNumbers: [number],
-          found: false,
-          error: error.message
-        };
-      }
-    });
-    
-    // Wait for all promises in this chunk
-    const chunkResults = await Promise.all(chunkPromises);
-    allResults.push(...chunkResults);
-    
-    // Update progress
-    const currentFound = allResults.filter(r => r.found).length;
-    console.log(`📊 Progress: ${allResults.length}/${numbers.length} (${currentFound} found)`);
-    
-    // Small delay between chunks to avoid rate limiting
-    if (i + CONCURRENCY < numbers.length) {
-      await new Promise(resolve => setTimeout(resolve, 200));
-    }
-  }
-  
-  console.log(`✅ Batch complete: ${allResults.filter(r => r.found).length}/${numbers.length} found`);
-  return allResults;
-};
-
-// ================================================================
-// MAIN HANDLER
-// ================================================================
-module.exports = async (req, res) => {
+export default async function handler(req, res) {
+  // CORS Headers
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  
-  if (req.method === 'OPTIONS') return res.status(200).end();
 
-  const startTime = Date.now();
-
-  // ================================================================
-  // BATCH ENDPOINT - POST /api/batch
-  // ================================================================
-  if (req.method === 'POST') {
-    try {
-      const { numbers } = req.body;
-      
-      if (!numbers || !Array.isArray(numbers) || numbers.length === 0) {
-        return res.status(400).json({
-          success: false,
-          error: 'Missing "numbers" array parameter',
-          example: { numbers: ['923001234567', '923001234568'] }
-        });
-      }
-      
-      // Increased limit to 200 numbers per request
-      if (numbers.length > 200) {
-        return res.status(400).json({
-          success: false,
-          error: 'Maximum 200 numbers per batch request'
-        });
-      }
-      
-      const uniqueNumbers = [];
-      const seen = new Set();
-      for (const num of numbers) {
-        const cleaned = utils.normalizePhone(num);
-        if (cleaned && !seen.has(cleaned)) {
-          seen.add(cleaned);
-          uniqueNumbers.push(cleaned);
-        }
-      }
-      
-      if (uniqueNumbers.length === 0) {
-        return res.status(400).json({
-          success: false,
-          error: 'No valid numbers provided'
-        });
-      }
-      
-      console.log(`📊 Batch request: ${uniqueNumbers.length} unique numbers`);
-      
-      const results = await batchSearch(uniqueNumbers);
-      
-      const foundCount = results.filter(r => r.found).length;
-      
-      console.log(`✅ Batch response: ${foundCount} found, ${results.length - foundCount} not found (${Date.now() - startTime}ms)`);
-      
-      return res.status(200).json({
-        success: true,
-        total: results.length,
-        found: foundCount,
-        notFound: results.length - foundCount,
-        results: results,
-        responseTime: `${Date.now() - startTime}ms`
-      });
-      
-    } catch (error) {
-      console.error('Batch error:', error);
-      return res.status(500).json({
-        success: false,
-        error: 'Internal server error',
-        message: error.message
-      });
-    }
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
   }
 
-  // ================================================================
-  // SINGLE SEARCH ENDPOINT - GET /api/search
-  // ================================================================
-  const { query } = req.query;
-  if (!query) {
+  const { search } = req.query;
+
+  if (!search) {
     return res.status(400).json({
       success: false,
-      error: 'Missing "query" parameter',
-      example: '/api/search?query=03329457632'
+      error: 'Please provide "search" parameter (Phone number)'
+    });
+  }
+
+  // --- CLEAN INPUT ---
+  let cleanInput = search.trim()
+    .replace(/\s/g, '')
+    .replace(/-/g, '')
+    .replace(/\(/g, '')
+    .replace(/\)/g, '')
+    .replace(/\+/g, '');
+
+  // --- PHONE NUMBER FORMATTING ---
+  let phoneNumber = cleanInput;
+
+  // Remove country code (92 or 923)
+  if (phoneNumber.startsWith('923')) {
+    phoneNumber = phoneNumber.substring(3);
+  } else if (phoneNumber.startsWith('92')) {
+    phoneNumber = phoneNumber.substring(2);
+  }
+
+  // Add leading 0 if missing
+  if (/^3[0-9]{9}$/.test(phoneNumber)) {
+    phoneNumber = '0' + phoneNumber;
+  } else if (/^[0-9]{10}$/.test(phoneNumber) && phoneNumber.startsWith('3')) {
+    phoneNumber = '0' + phoneNumber;
+  }
+
+  // Validate phone number (must be 11 digits starting with 03)
+  if (!/^03[0-9]{9}$/.test(phoneNumber)) {
+    return res.status(400).json({
+      success: false,
+      error: 'Invalid phone number. Must be 11 digits starting with 03'
     });
   }
 
   try {
-    const cacheKey = query.toString().trim();
-    const cached = cache.get(cacheKey);
-    if (cached) {
-      return res.status(200).json({
-        ...cached,
-        cached: true,
-        responseTime: `${Date.now() - startTime}ms`
-      });
+    // --- FETCH FROM PAKSIM.INFO ---
+    const paksimResponse = await fetch('https://paksim.info/sim-database-online-2022-result.php', {
+      method: 'POST',
+      headers: {
+        'host': 'paksim.info',
+        'content-type': 'application/x-www-form-urlencoded',
+        'user-agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Mobile Safari/537.36',
+        'origin': 'https://paksim.info',
+        'referer': 'https://paksim.info/search.php',
+        'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+        'accept-encoding': 'gzip, deflate, br, zstd',
+        'accept-language': 'ur,en-US;q=0.9,en;q=0.8',
+        'cache-control': 'max-age=0',
+        'sec-ch-ua': '"Not(A:Brand";v="8", "Chromium";v="144", "Google Chrome";v="144"',
+        'sec-ch-ua-mobile': '?1',
+        'sec-ch-ua-platform': '"Android"',
+        'sec-fetch-site': 'same-origin',
+        'sec-fetch-mode': 'navigate',
+        'sec-fetch-user': '?1',
+        'sec-fetch-dest': 'document',
+        'upgrade-insecure-requests': '1',
+        'priority': 'u=0, i'
+      },
+      body: new URLSearchParams({
+        cnnum: phoneNumber
+      })
+    });
+
+    if (!paksimResponse.ok) {
+      throw new Error(`HTTP error! status: ${paksimResponse.status}`);
     }
 
-    const type = utils.detectType(query);
-    const BASE_API = 'https://kingdb.xyz/api.php';
-    let allRecords = [];
-    let cnicFound = null;
+    const html = await paksimResponse.text();
+    
+    // --- PARSE HTML ---
+    const parsedData = parsePaksimHTML(html);
 
-    if (type === 'phone') {
-      const normalized = utils.normalizePhone(query);
-      const result = await fetchData(`${BASE_API}?query=${normalized}`);
-      if (result.status && result.data && result.data.data) {
-        allRecords = [...result.data.data];
-        if (allRecords.length > 0 && allRecords[0].cni) {
-          cnicFound = allRecords[0].cni;
-        }
-      }
-    } else if (type === 'cnic') {
-      const normalized = utils.normalizeCNIC(query);
-      const result = await fetchData(`${BASE_API}?query=${normalized}`);
-      if (result.status && result.data && result.data.data) {
-        allRecords = [...result.data.data];
-      }
-    } else {
-      return res.status(400).json({
-        success: false,
-        error: 'Invalid format. Use phone number or CNIC.'
-      });
-    }
-
-    if (cnicFound && type === 'phone') {
-      const cnicResult = await fetchData(`${BASE_API}?query=${cnicFound}`);
-      if (cnicResult.status && cnicResult.data && cnicResult.data.data) {
-        const cnicRecords = cnicResult.data.data;
-        const existingNbrs = new Set(allRecords.map(r => r.nbr));
-        cnicRecords.forEach(record => {
-          if (!existingNbrs.has(record.nbr)) {
-            allRecords.push(record);
-            existingNbrs.add(record.nbr);
-          }
-        });
-      }
-    }
-
-    if (allRecords.length === 0) {
+    if (!parsedData || parsedData.length === 0) {
       return res.status(404).json({
         success: false,
-        error: 'No data found',
-        query: query
+        error: 'No data found for this phone number',
+        query: phoneNumber
       });
     }
 
-    const names = [...new Set(allRecords.map(r => r.nam).filter(Boolean))];
-    const blacklist = [
-      'data not recieved from nadra',
-      'data not received from nadra',
-      'not received',
-      'no data',
-      'unknown',
-      'n/a',
-      'null',
-      'undefined',
-      'no',
-      '-'
-    ];
-
-    const validNames = names.filter(name => {
-      if (!name) return false;
-      const cleanName = name.toString().trim();
-      if (cleanName.length < 2) return false;
-      const lowerName = cleanName.toLowerCase();
-      return !blacklist.some(bad => lowerName.includes(bad));
-    });
-
-    let finalName = 'Unknown';
-    if (validNames.length > 0) {
-      const nameCount = {};
-      validNames.forEach(n => {
-        nameCount[n] = (nameCount[n] || 0) + 1;
-      });
-      finalName = Object.keys(nameCount).reduce((a, b) => 
-        nameCount[a] > nameCount[b] ? a : b
-      );
-    } else {
-      finalName = names[0] || 'Unknown';
-    }
-
-    const numbers = [...new Set(allRecords.map(r => r.nbr).filter(Boolean))];
-    const cnis = [...new Set(allRecords.map(r => r.cni).filter(Boolean))];
-    
-    let bestAddress = 'No address available';
-    let maxLen = 0;
-    const addrBlacklist = ['no', 'n/a', 'null', 'undefined', '-', 'na'];
-    allRecords.forEach(record => {
-      if (record.adr && record.adr.toString().trim().length > 0) {
-        const addr = record.adr.toString().trim();
-        const lowerAddr = addr.toLowerCase();
-        if (!addrBlacklist.includes(lowerAddr) && addr.length > maxLen) {
-          maxLen = addr.length;
-          bestAddress = addr;
-        }
+    // --- REMOVE DUPLICATES (by CNIC or Name) ---
+    const seenRecords = new Set();
+    const uniqueData = parsedData.filter(item => {
+      const key = `${item.Cnic}_${item.Name}`;
+      if (!seenRecords.has(key)) {
+        seenRecords.add(key);
+        return true;
       }
+      return false;
     });
 
-    const response = {
-      success: true,
-      query: query,
-      detectedType: type,
-      data: {
-        name: finalName,
-        allNumbers: numbers,
-        cnic: cnis[0] || null,
-        completeAddress: bestAddress,
-        totalRecords: allRecords.length,
-        records: allRecords
-      },
-      responseTime: `${Date.now() - startTime}ms`
+    // --- FORMAT RESPONSE ---
+    let formattedData;
+    if (uniqueData.length === 1) {
+      // Single record: return object
+      const item = uniqueData[0];
+      formattedData = {
+        Name: item.Name,
+        Cnic: item.Cnic,
+        Mobile: item.Mobile,
+        Address: item.Address
+      };
+    } else {
+      // Multiple records: return array
+      formattedData = uniqueData.map(item => ({
+        Name: item.Name,
+        Cnic: item.Cnic,
+        Mobile: item.Mobile,
+        Address: item.Address
+      }));
+    }
+
+    // --- CREDIT ---
+    const credit = {
+      credit: "AZ Tricks",
+      telegram: "https://t.me/AZ_Tricks"
     };
 
-    cache.set(cacheKey, response);
-    return res.status(200).json(response);
+    // --- FINAL RESPONSE ---
+    const finalResponse = {
+      success: true,
+      query: phoneNumber,
+      type: 'phone',
+      total: uniqueData.length,
+      data: formattedData,
+      ...credit
+    };
+
+    return res.status(200).json(finalResponse);
 
   } catch (error) {
-    console.error('Error:', error);
+    console.error('API Error:', error);
     return res.status(500).json({
       success: false,
-      error: 'Internal server error',
+      error: 'Internal Server Error',
       message: error.message
     });
   }
-};
+}
+
+// --- HELPER: Parse paksim.info HTML ---
+function parsePaksimHTML(html) {
+  try {
+    const results = [];
+    
+    // Find the table with results
+    const tableStart = html.indexOf('<table');
+    const tableEnd = html.indexOf('</table>', tableStart);
+    
+    if (tableStart === -1 || tableEnd === -1) {
+      return results;
+    }
+    
+    const tableHTML = html.substring(tableStart, tableEnd + 8);
+    
+    // Extract all rows
+    const rowRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+    const cellRegex = /<td[^>]*>([\s\S]*?)<\/td>/gi;
+    
+    let rowMatch;
+    let isHeader = true;
+    
+    while ((rowMatch = rowRegex.exec(tableHTML)) !== null) {
+      // Skip header row
+      if (isHeader) {
+        isHeader = false;
+        continue;
+      }
+      
+      const row = rowMatch[1];
+      const cells = [];
+      let cellMatch;
+      
+      while ((cellMatch = cellRegex.exec(row)) !== null) {
+        let content = cellMatch[1]
+          .replace(/<[^>]*>/g, '') // Remove HTML tags
+          .replace(/&nbsp;/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+        cells.push(content);
+      }
+      
+      // Expecting at least 4 columns: Name, CNIC, Mobile, Address
+      if (cells.length >= 4) {
+        results.push({
+          Name: cells[0] || 'N/A',
+          Cnic: cells[1] || 'N/A',
+          Mobile: cells[2] || 'N/A',
+          Address: cells[3] || 'N/A'
+        });
+      }
+    }
+    
+    return results;
+  } catch (error) {
+    console.error('HTML parsing error:', error);
+    return null;
+  }
+        }
