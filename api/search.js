@@ -45,48 +45,44 @@ export default async function handler(req, res) {
     console.log(`🔍 Searching for: ${phoneNumber}`);
 
     // =============================================
-    // 📞 SEARCH FUNCTION with FALLBACK
+    // 📞 SEARCH FUNCTION
     // =============================================
     async function searchData(query) {
       try {
-        // Try paksim.info
         const response = await fetch('https://paksim.info/sim-database-online-2022-result.php', {
           method: 'POST',
           headers: {
             'content-type': 'application/x-www-form-urlencoded',
-            'user-agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36',
+            'user-agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Mobile Safari/537.36',
             'origin': 'https://paksim.info',
-            'referer': 'https://paksim.info/search.php'
+            'referer': 'https://paksim.info/search.php',
+            'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'accept-language': 'ur,en-US;q=0.9,en;q=0.8',
+            'cache-control': 'max-age=0',
+            'sec-ch-ua': '"Not(A:Brand";v="8", "Chromium";v="144", "Google Chrome";v="144"',
+            'sec-ch-ua-mobile': '?1',
+            'sec-ch-ua-platform': '"Android"'
           },
           body: new URLSearchParams({ cnnum: query })
         });
 
-        if (response.ok) {
-          const html = await response.text();
-          const data = parsePaksimHTML(html);
-          if (data && data.length > 0) return data;
+        if (!response.ok) {
+          console.log(`HTTP Error: ${response.status}`);
+          return [];
         }
-      } catch (e) {
-        console.log('Paksim failed:', e.message);
-      }
 
-      // FALLBACK: Try kingdb.xyz
-      try {
-        const response = await fetch(`https://kingdb.xyz/api.php?query=${query}`);
-        const data = await response.json();
-        if (data.status && data.data && data.data.data) {
-          return data.data.data.map(item => ({
-            Name: item.nam || 'Unknown',
-            Cnic: item.cni || 'N/A',
-            Mobile: item.nbr || query,
-            Address: item.adr || 'No address'
-          }));
-        }
-      } catch (e) {
-        console.log('Kingdb failed:', e.message);
+        const html = await response.text();
+        console.log(`📄 HTML Length: ${html.length}`);
+        
+        // Save HTML for debugging (first 500 chars)
+        console.log(`📄 HTML Preview: ${html.substring(0, 500)}...`);
+        
+        return parsePaksimHTML(html);
+        
+      } catch (error) {
+        console.error('Search error:', error);
+        return [];
       }
-
-      return [];
     }
 
     // =============================================
@@ -102,18 +98,15 @@ export default async function handler(req, res) {
         detectedCNIC = cleanInput;
       }
     } else {
-      // Search by phone
       const phoneRecords = await searchData(phoneNumber);
       if (phoneRecords.length > 0) {
         allRecords = phoneRecords;
         
-        // Extract CNIC and search for all numbers
         const cnis = getAllCNICs(phoneRecords);
         if (cnis.length > 0) {
           detectedCNIC = cnis[0];
           console.log(`📌 Found CNIC: ${detectedCNIC}`);
           
-          // Search by CNIC for all numbers
           const cnicRecords = await searchData(detectedCNIC);
           if (cnicRecords.length > 0) {
             const existingNumbers = new Set(allRecords.map(r => r.Mobile));
@@ -151,13 +144,11 @@ export default async function handler(req, res) {
       return false;
     });
 
-    // Smart filters (same as before)
     const finalName = getSmartName(uniqueData);
     const bestAddress = getSmartAddress(uniqueData);
     const allNumbers = getAllNumbers(uniqueData);
     const allCNICs = getAllCNICs(uniqueData);
 
-    // Final response
     const finalResponse = {
       success: true,
       query: isCNIC ? cleanInput : phoneNumber,
@@ -193,54 +184,141 @@ export default async function handler(req, res) {
 }
 
 // =============================================
-// 🔧 HELPER FUNCTIONS
+// 🔧 UPDATED PARSER - Supports New Paksim Structure
 // =============================================
-
 function parsePaksimHTML(html) {
   try {
     const results = [];
-    const tableStart = html.indexOf('<table');
-    const tableEnd = html.indexOf('</table>', tableStart);
     
-    if (tableStart === -1 || tableEnd === -1) return results;
+    // Method 1: Try to find data in script tags or JSON
+    const jsonMatch = html.match(/var\s+data\s*=\s*(\[[\s\S]*?\]);/);
+    if (jsonMatch) {
+      try {
+        const jsonData = JSON.parse(jsonMatch[1]);
+        if (Array.isArray(jsonData) && jsonData.length > 0) {
+          return jsonData.map(item => ({
+            Name: item.name || item.Name || 'N/A',
+            Cnic: item.cnic || item.Cnic || 'N/A',
+            Mobile: item.mobile || item.Mobile || 'N/A',
+            Address: item.address || item.Address || 'N/A'
+          }));
+        }
+      } catch (e) {}
+    }
 
-    const tableHTML = html.substring(tableStart, tableEnd + 8);
-    const rowRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
-    const cellRegex = /<td[^>]*>([\s\S]*?)<\/td>/gi;
+    // Method 2: Find table with specific classes
+    const tableRegex = /<table[^>]*class=["']([^"']*table[^"']*)["'][^>]*>([\s\S]*?)<\/table>/i;
+    const tableMatch = html.match(tableRegex);
     
-    let rowMatch;
-    let isHeader = true;
-    
-    while ((rowMatch = rowRegex.exec(tableHTML)) !== null) {
-      if (isHeader) { isHeader = false; continue; }
+    if (tableMatch) {
+      const tableHTML = tableMatch[2];
+      const rowRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+      const cellRegex = /<td[^>]*>([\s\S]*?)<\/td>/gi;
       
-      const cells = [];
-      let cellMatch;
-      while ((cellMatch = cellRegex.exec(rowMatch[1])) !== null) {
-        let content = cellMatch[1]
-          .replace(/<[^>]*>/g, '')
-          .replace(/&nbsp;/g, ' ')
-          .replace(/\s+/g, ' ')
-          .trim();
-        cells.push(content);
+      let rowMatch;
+      let isHeader = true;
+      
+      while ((rowMatch = rowRegex.exec(tableHTML)) !== null) {
+        if (isHeader) {
+          isHeader = false;
+          continue;
+        }
+        
+        const cells = [];
+        let cellMatch;
+        while ((cellMatch = cellRegex.exec(rowMatch[1])) !== null) {
+          let content = cellMatch[1]
+            .replace(/<[^>]*>/g, '')
+            .replace(/&nbsp;/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+          cells.push(content);
+        }
+        
+        if (cells.length >= 4) {
+          results.push({
+            Name: cells[0] || 'N/A',
+            Cnic: cells[1] || 'N/A',
+            Mobile: cells[2] || 'N/A',
+            Address: cells[3] || 'N/A'
+          });
+        }
       }
       
-      if (cells.length >= 4) {
-        results.push({
-          Name: cells[0] || 'N/A',
-          Cnic: cells[1] || 'N/A',
-          Mobile: cells[2] || 'N/A',
-          Address: cells[3] || 'N/A'
-        });
+      if (results.length > 0) return results;
+    }
+
+    // Method 3: Look for div-based structure
+    const divRegex = /<div[^>]*class=["']([^"']*result[^"']*)["'][^>]*>([\s\S]*?)<\/div>/gi;
+    let divMatch;
+    let tempData = {};
+    let tempResults = [];
+    
+    while ((divMatch = divRegex.exec(html)) !== null) {
+      const content = divMatch[2];
+      
+      const nameMatch = content.match(/Name[:\s]*([^<]*)/i);
+      if (nameMatch) tempData.Name = nameMatch[1].trim();
+      
+      const cnicMatch = content.match(/CNIC[:\s]*([^<]*)/i);
+      if (cnicMatch) tempData.Cnic = cnicMatch[1].trim();
+      
+      const mobileMatch = content.match(/Mobile[:\s]*([^<]*)/i);
+      if (mobileMatch) tempData.Mobile = mobileMatch[1].trim();
+      
+      const addressMatch = content.match(/Address[:\s]*([^<]*)/i);
+      if (addressMatch) tempData.Address = addressMatch[1].trim();
+      
+      if (tempData.Name && tempData.Mobile) {
+        tempResults.push({...tempData});
+        tempData = {};
       }
     }
+    
+    if (tempResults.length > 0) return tempResults;
+
+    // Method 4: Direct text extraction (Last resort)
+    const text = html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+    const lines = text.split(/\n|\.\s+/);
+    
+    let currentRecord = {};
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      
+      if (trimmed.match(/[A-Za-z]+\s+[A-Za-z]+/)) {
+        if (currentRecord.Name) {
+          if (currentRecord.Name && currentRecord.Mobile) {
+            results.push({...currentRecord});
+          }
+          currentRecord = {};
+        }
+        currentRecord.Name = trimmed;
+      } else if (trimmed.match(/[0-9]{13}/)) {
+        currentRecord.Cnic = trimmed;
+      } else if (trimmed.match(/03[0-9]{9}/)) {
+        currentRecord.Mobile = trimmed;
+      } else if (trimmed.length > 5) {
+        currentRecord.Address = trimmed;
+      }
+    }
+    
+    if (currentRecord.Name && currentRecord.Mobile) {
+      results.push(currentRecord);
+    }
+
+    console.log(`✅ Parsed ${results.length} records`);
     return results;
+    
   } catch (error) {
     console.error('Parse error:', error);
     return [];
   }
 }
 
+// =============================================
+// 🔧 HELPER FUNCTIONS
+// =============================================
 function getSmartName(records) {
   const garbage = ['data not recieved from nadra', 'data not received from nadra', 'not received', 'no data', 'unknown', 'n/a', 'null', 'undefined', 'no', '-'];
   const names = records.map(r => r.Name).filter(n => n && n.trim().length > 0).map(n => n.trim());
@@ -279,4 +357,4 @@ function getAllNumbers(records) {
 function getAllCNICs(records) {
   const cnis = records.map(r => r.Cnic).filter(c => c && c.trim().length > 0).map(c => c.trim());
   return [...new Set(cnis)];
-            }
+                      }
