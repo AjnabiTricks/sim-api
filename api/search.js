@@ -25,88 +25,176 @@ export default async function handler(req, res) {
     .replace(/\)/g, '')
     .replace(/\+/g, '');
 
-  // --- PHONE NUMBER FORMATTING ---
+  // --- DETECT INPUT TYPE (Phone or CNIC) ---
+  let isCNIC = false;
   let phoneNumber = cleanInput;
+  let cnicNumber = cleanInput;
 
-  if (phoneNumber.startsWith('923')) {
-    phoneNumber = phoneNumber.substring(3);
-  } else if (phoneNumber.startsWith('92')) {
-    phoneNumber = phoneNumber.substring(2);
-  }
+  // Check if input is CNIC (13 digits)
+  if (/^[0-9]{13}$/.test(cleanInput)) {
+    isCNIC = true;
+    cnicNumber = cleanInput;
+    console.log(`🔍 Searching by CNIC: ${cnicNumber}`);
+  } else {
+    // --- PHONE NUMBER FORMATTING ---
+    if (phoneNumber.startsWith('923')) {
+      phoneNumber = phoneNumber.substring(3);
+    } else if (phoneNumber.startsWith('92')) {
+      phoneNumber = phoneNumber.substring(2);
+    }
 
-  if (/^3[0-9]{9}$/.test(phoneNumber)) {
-    phoneNumber = '0' + phoneNumber;
-  } else if (/^[0-9]{10}$/.test(phoneNumber) && phoneNumber.startsWith('3')) {
-    phoneNumber = '0' + phoneNumber;
-  }
+    if (/^3[0-9]{9}$/.test(phoneNumber)) {
+      phoneNumber = '0' + phoneNumber;
+    } else if (/^[0-9]{10}$/.test(phoneNumber) && phoneNumber.startsWith('3')) {
+      phoneNumber = '0' + phoneNumber;
+    }
 
-  if (!/^03[0-9]{9}$/.test(phoneNumber)) {
-    return res.status(400).json({
-      success: false,
-      error: 'Invalid phone number. Must be 11 digits starting with 03'
-    });
+    if (!/^03[0-9]{9}$/.test(phoneNumber)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid phone number. Must be 11 digits starting with 03'
+      });
+    }
+    console.log(`🔍 Searching by Phone: ${phoneNumber}`);
   }
 
   try {
-    console.log(`🔍 Searching for: ${phoneNumber}`);
+    // =============================================
+    // 📞 FUNCTION: Search by Phone Number
+    // =============================================
+    async function searchByPhone(phone) {
+      const response = await fetch('https://paksim.info/sim-database-online-2022-result.php', {
+        method: 'POST',
+        headers: {
+          'host': 'paksim.info',
+          'content-type': 'application/x-www-form-urlencoded',
+          'user-agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Mobile Safari/537.36',
+          'origin': 'https://paksim.info',
+          'referer': 'https://paksim.info/search.php',
+          'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+          'accept-encoding': 'gzip, deflate, br, zstd',
+          'accept-language': 'ur,en-US;q=0.9,en;q=0.8',
+          'cache-control': 'max-age=0',
+          'sec-ch-ua': '"Not(A:Brand";v="8", "Chromium";v="144", "Google Chrome";v="144"',
+          'sec-ch-ua-mobile': '?1',
+          'sec-ch-ua-platform': '"Android"',
+          'sec-fetch-site': 'same-origin',
+          'sec-fetch-mode': 'navigate',
+          'sec-fetch-user': '?1',
+          'sec-fetch-dest': 'document',
+          'upgrade-insecure-requests': '1',
+          'priority': 'u=0, i'
+        },
+        body: new URLSearchParams({
+          cnnum: phone
+        })
+      });
 
-    const paksimResponse = await fetch('https://paksim.info/sim-database-online-2022-result.php', {
-      method: 'POST',
-      headers: {
-        'host': 'paksim.info',
-        'content-type': 'application/x-www-form-urlencoded',
-        'user-agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Mobile Safari/537.36',
-        'origin': 'https://paksim.info',
-        'referer': 'https://paksim.info/search.php',
-        'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-        'accept-encoding': 'gzip, deflate, br, zstd',
-        'accept-language': 'ur,en-US;q=0.9,en;q=0.8',
-        'cache-control': 'max-age=0',
-        'sec-ch-ua': '"Not(A:Brand";v="8", "Chromium";v="144", "Google Chrome";v="144"',
-        'sec-ch-ua-mobile': '?1',
-        'sec-ch-ua-platform': '"Android"',
-        'sec-fetch-site': 'same-origin',
-        'sec-fetch-mode': 'navigate',
-        'sec-fetch-user': '?1',
-        'sec-fetch-dest': 'document',
-        'upgrade-insecure-requests': '1',
-        'priority': 'u=0, i'
-      },
-      body: new URLSearchParams({
-        cnnum: phoneNumber
-      })
-    });
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
 
-    if (!paksimResponse.ok) {
-      console.error(`❌ HTTP Error: ${paksimResponse.status}`);
-      throw new Error(`HTTP error! status: ${paksimResponse.status}`);
+      const html = await response.text();
+      return parsePaksimHTML(html);
     }
 
-    const html = await paksimResponse.text();
-    
-    console.log(`📄 HTML Length: ${html.length}`);
+    // =============================================
+    // 📞 FUNCTION: Search by CNIC
+    // =============================================
+    async function searchByCNIC(cnic) {
+      const response = await fetch('https://paksim.info/cnic-sim-database-online-2022-result.php', {
+        method: 'POST',
+        headers: {
+          'host': 'paksim.info',
+          'content-type': 'application/x-www-form-urlencoded',
+          'user-agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Mobile Safari/537.36',
+          'origin': 'https://paksim.info',
+          'referer': 'https://paksim.info/cnic-search.php',
+          'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+          'accept-encoding': 'gzip, deflate, br, zstd',
+          'accept-language': 'ur,en-US;q=0.9,en;q=0.8',
+          'cache-control': 'max-age=0',
+          'sec-ch-ua': '"Not(A:Brand";v="8", "Chromium";v="144", "Google Chrome";v="144"',
+          'sec-ch-ua-mobile': '?1',
+          'sec-ch-ua-platform': '"Android"',
+          'sec-fetch-site': 'same-origin',
+          'sec-fetch-mode': 'navigate',
+          'sec-fetch-user': '?1',
+          'sec-fetch-dest': 'document',
+          'upgrade-insecure-requests': '1',
+          'priority': 'u=0, i'
+        },
+        body: new URLSearchParams({
+          cnicnum: cnic
+        })
+      });
 
-    // --- PARSE HTML ---
-    let parsedData = parsePaksimHTML(html);
-    
-    if (!parsedData || parsedData.length === 0) {
-      parsedData = parsePaksimHTMLAlt(html);
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      const html = await response.text();
+      return parsePaksimHTML(html);
     }
 
-    console.log(`📊 Parsed Data Count: ${parsedData ? parsedData.length : 0}`);
+    // =============================================
+    // 🔍 MAIN SEARCH LOGIC
+    // =============================================
+    let allRecords = [];
+    let detectedCNIC = null;
 
-    if (!parsedData || parsedData.length === 0) {
+    if (isCNIC) {
+      // If searching by CNIC directly
+      const records = await searchByCNIC(cnicNumber);
+      if (records && records.length > 0) {
+        allRecords = records;
+        detectedCNIC = cnicNumber;
+      }
+    } else {
+      // Step 1: Search by phone number
+      const phoneRecords = await searchByPhone(phoneNumber);
+      
+      if (phoneRecords && phoneRecords.length > 0) {
+        allRecords = phoneRecords;
+        
+        // Step 2: Extract CNIC from phone search
+        const cnis = getAllCNICs(phoneRecords);
+        if (cnis.length > 0) {
+          detectedCNIC = cnis[0];
+          console.log(`📌 Found CNIC: ${detectedCNIC}, fetching all numbers...`);
+          
+          // Step 3: Search by CNIC to get ALL numbers
+          const cnicRecords = await searchByCNIC(detectedCNIC);
+          if (cnicRecords && cnicRecords.length > 0) {
+            // Merge records, avoid duplicates
+            const existingNumbers = new Set(allRecords.map(r => r.Mobile));
+            cnicRecords.forEach(record => {
+              if (!existingNumbers.has(record.Mobile)) {
+                allRecords.push(record);
+                existingNumbers.add(record.Mobile);
+              }
+            });
+            console.log(`✅ Merged ${cnicRecords.length} records from CNIC search`);
+          }
+        }
+      }
+    }
+
+    // =============================================
+    // 📊 PROCESS RESULTS
+    // =============================================
+    if (!allRecords || allRecords.length === 0) {
       return res.status(404).json({
         success: false,
-        error: 'No data found for this phone number',
-        query: phoneNumber
+        error: 'No data found',
+        query: search
       });
     }
 
-    // --- REMOVE DUPLICATES ---
+    // Remove duplicates
     const seenRecords = new Set();
-    const uniqueData = parsedData.filter(item => {
-      const key = `${item.Cnic}_${item.Name}`;
+    const uniqueData = allRecords.filter(item => {
+      const key = `${item.Cnic}_${item.Mobile}`;
       if (!seenRecords.has(key)) {
         seenRecords.add(key);
         return true;
@@ -115,7 +203,7 @@ export default async function handler(req, res) {
     });
 
     // =============================================
-    // 🔥 SMART NAME FILTER - IGNORE GARBAGE
+    // 🔥 SMART NAME FILTER
     // =============================================
     function getSmartName(records) {
       const garbageNames = [
@@ -173,7 +261,7 @@ export default async function handler(req, res) {
     // 🏠 SMART ADDRESS FILTER
     // =============================================
     function getSmartAddress(records) {
-      const garbageAddresses = ['no', 'n/a', 'null', 'undefined', '-', 'na', 'no address', 'nill'];
+      const garbageAddresses = ['no', 'n/a', 'null', 'undefined', '-', 'na', 'no address', 'nill', 'none'];
       
       let bestAddress = 'No address available';
       let maxLength = 0;
@@ -223,36 +311,28 @@ export default async function handler(req, res) {
     const allCNICs = getAllCNICs(uniqueData);
 
     // =============================================
-    // 📦 FORMAT FINAL RESPONSE
+    // 📦 FORMAT FINAL RESPONSE (Like Before)
     // =============================================
-    const formattedData = {
-      name: finalName,
-      allNumbers: allNumbers,
-      cnic: allCNICs[0] || null,
-      allCNICs: allCNICs,
-      completeAddress: bestAddress,
-      totalRecords: uniqueData.length,
-      records: uniqueData.map(item => ({
-        name: item.Name,
-        cnic: item.Cnic,
-        number: item.Mobile,
-        address: item.Address
-      }))
-    };
-
-    // --- CREDIT ---
-    const credit = {
-      credit: "AZ Tricks",
-      telegram: "https://t.me/AZ_Tricks"
-    };
-
-    // --- FINAL RESPONSE ---
     const finalResponse = {
       success: true,
-      query: phoneNumber,
-      type: 'phone',
-      data: formattedData,
-      ...credit
+      query: isCNIC ? cnicNumber : phoneNumber,
+      detectedType: isCNIC ? 'cnic' : 'phone',
+      data: {
+        name: finalName,
+        allNumbers: allNumbers,
+        cnic: allCNICs[0] || null,
+        allCNICs: allCNICs,
+        completeAddress: bestAddress,
+        totalRecords: uniqueData.length,
+        records: uniqueData.map(item => ({
+          name: item.Name,
+          cnic: item.Cnic,
+          number: item.Mobile,
+          address: item.Address
+        }))
+      },
+      credit: "AZ Tricks",
+      telegram: "https://t.me/AZ_Tricks"
     };
 
     return res.status(200).json(finalResponse);
@@ -267,7 +347,10 @@ export default async function handler(req, res) {
   }
 }
 
-// --- METHOD 1: Regex-based parsing ---
+// =============================================
+// 🔧 PARSING FUNCTIONS
+// =============================================
+
 function parsePaksimHTML(html) {
   try {
     const results = [];
@@ -320,44 +403,6 @@ function parsePaksimHTML(html) {
     return results;
   } catch (error) {
     console.error('Parse error:', error);
-    return null;
+    return [];
   }
-}
-
-// --- METHOD 2: Alternative parsing ---
-function parsePaksimHTMLAlt(html) {
-  try {
-    const results = [];
-    
-    const tdRegex = /<td[^>]*>([\s\S]*?)<\/td>/gi;
-    const allCells = [];
-    let match;
-    
-    while ((match = tdRegex.exec(html)) !== null) {
-      let content = match[1]
-        .replace(/<[^>]*>/g, '')
-        .replace(/&nbsp;/g, ' ')
-        .replace(/\s+/g, ' ')
-        .trim();
-      if (content) {
-        allCells.push(content);
-      }
     }
-    
-    for (let i = 0; i < allCells.length; i += 4) {
-      if (i + 3 < allCells.length) {
-        results.push({
-          Name: allCells[i] || 'N/A',
-          Cnic: allCells[i+1] || 'N/A',
-          Mobile: allCells[i+2] || 'N/A',
-          Address: allCells[i+3] || 'N/A'
-        });
-      }
-    }
-    
-    return results;
-  } catch (error) {
-    console.error('Alt parse error:', error);
-    return null;
-  }
-        }
