@@ -45,42 +45,91 @@ export default async function handler(req, res) {
     console.log(`🔍 Searching for: ${phoneNumber}`);
 
     // =============================================
-    // 📞 SEARCH FUNCTION
+    // 📞 SEARCH FUNCTION WITH DELAY & ROTATING UA
     // =============================================
-    async function searchData(query) {
+    async function searchData(query, retryCount = 0) {
+      // ⏰ Add delay to avoid rate limiting
+      if (retryCount > 0) {
+        await new Promise(resolve => setTimeout(resolve, 3000 * retryCount));
+      }
+      
+      // 🔄 Rotate user agents
+      const userAgents = [
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0',
+        'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
+        'Mozilla/5.0 (Linux; Android 13; SM-G998B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36'
+      ];
+      
+      const randomUA = userAgents[Math.floor(Math.random() * userAgents.length)];
+      
       try {
         const response = await fetch('https://paksim.info/sim-database-online-2022-result.php', {
           method: 'POST',
           headers: {
             'content-type': 'application/x-www-form-urlencoded',
-            'user-agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Mobile Safari/537.36',
+            'user-agent': randomUA,
             'origin': 'https://paksim.info',
             'referer': 'https://paksim.info/search.php',
             'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
             'accept-language': 'ur,en-US;q=0.9,en;q=0.8',
             'cache-control': 'max-age=0',
-            'sec-ch-ua': '"Not(A:Brand";v="8", "Chromium";v="144", "Google Chrome";v="144"',
-            'sec-ch-ua-mobile': '?1',
-            'sec-ch-ua-platform': '"Android"'
+            'sec-ch-ua': '"Not(A:Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"Windows"',
+            'sec-fetch-site': 'same-origin',
+            'sec-fetch-mode': 'navigate',
+            'sec-fetch-user': '?1',
+            'sec-fetch-dest': 'document',
+            'upgrade-insecure-requests': '1',
+            'priority': 'u=0, i'
           },
           body: new URLSearchParams({ cnnum: query })
         });
 
         if (!response.ok) {
           console.log(`HTTP Error: ${response.status}`);
+          if (response.status === 429 || response.status === 403) {
+            // Rate limited - retry with longer delay
+            if (retryCount < 3) {
+              console.log(`⚠️ Rate limited, retrying... (${retryCount + 1})`);
+              return searchData(query, retryCount + 1);
+            }
+          }
           return [];
         }
 
         const html = await response.text();
         console.log(`📄 HTML Length: ${html.length}`);
         
-        // Save HTML for debugging (first 500 chars)
-        console.log(`📄 HTML Preview: ${html.substring(0, 500)}...`);
+        // Check if "No record found" message exists
+        if (html.includes('No record found') || html.includes('No data found') || html.includes('not found')) {
+          console.log('⚠️ Paksim says: No record found');
+          return [];
+        }
         
-        return parsePaksimHTML(html);
+        // Check if blocked
+        if (html.includes('blocked') || html.includes('security') || html.includes('captcha')) {
+          console.log('🚫 Paksim blocked the request');
+          if (retryCount < 3) {
+            await new Promise(resolve => setTimeout(resolve, 5000));
+            return searchData(query, retryCount + 1);
+          }
+          return [];
+        }
+        
+        const parsed = parsePaksimHTML(html);
+        console.log(`✅ Parsed ${parsed.length} records`);
+        return parsed;
         
       } catch (error) {
         console.error('Search error:', error);
+        if (retryCount < 2) {
+          console.log(`🔄 Retrying... (${retryCount + 1})`);
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          return searchData(query, retryCount + 1);
+        }
         return [];
       }
     }
@@ -127,9 +176,9 @@ export default async function handler(req, res) {
     if (!allRecords || allRecords.length === 0) {
       return res.status(404).json({
         success: false,
-        error: 'No data found. Try another number.',
+        error: 'No data found. Try another number or wait a few minutes.',
         query: search,
-        suggestion: 'Check if number is correct or try different network provider'
+        suggestion: 'Paksim.info might be rate limiting. Try after 2-3 minutes.'
       });
     }
 
@@ -184,34 +233,18 @@ export default async function handler(req, res) {
 }
 
 // =============================================
-// 🔧 UPDATED PARSER - Supports New Paksim Structure
+// 🔧 PARSER FUNCTIONS (same as before)
 // =============================================
 function parsePaksimHTML(html) {
   try {
     const results = [];
     
-    // Method 1: Try to find data in script tags or JSON
-    const jsonMatch = html.match(/var\s+data\s*=\s*(\[[\s\S]*?\]);/);
-    if (jsonMatch) {
-      try {
-        const jsonData = JSON.parse(jsonMatch[1]);
-        if (Array.isArray(jsonData) && jsonData.length > 0) {
-          return jsonData.map(item => ({
-            Name: item.name || item.Name || 'N/A',
-            Cnic: item.cnic || item.Cnic || 'N/A',
-            Mobile: item.mobile || item.Mobile || 'N/A',
-            Address: item.address || item.Address || 'N/A'
-          }));
-        }
-      } catch (e) {}
-    }
-
-    // Method 2: Find table with specific classes
-    const tableRegex = /<table[^>]*class=["']([^"']*table[^"']*)["'][^>]*>([\s\S]*?)<\/table>/i;
+    // Method 1: Table parsing
+    const tableRegex = /<table[^>]*>([\s\S]*?)<\/table>/i;
     const tableMatch = html.match(tableRegex);
     
     if (tableMatch) {
-      const tableHTML = tableMatch[2];
+      const tableHTML = tableMatch[1];
       const rowRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
       const cellRegex = /<td[^>]*>([\s\S]*?)<\/td>/gi;
       
@@ -245,69 +278,40 @@ function parsePaksimHTML(html) {
         }
       }
       
-      if (results.length > 0) return results;
+      if (results.length > 0) {
+        console.log(`✅ Table parser found ${results.length} records`);
+        return results;
+      }
     }
 
-    // Method 3: Look for div-based structure
-    const divRegex = /<div[^>]*class=["']([^"']*result[^"']*)["'][^>]*>([\s\S]*?)<\/div>/gi;
-    let divMatch;
-    let tempData = {};
-    let tempResults = [];
+    // Method 2: Alternative parsing
+    const tdRegex = /<td[^>]*>([\s\S]*?)<\/td>/gi;
+    const allCells = [];
+    let match;
     
-    while ((divMatch = divRegex.exec(html)) !== null) {
-      const content = divMatch[2];
-      
-      const nameMatch = content.match(/Name[:\s]*([^<]*)/i);
-      if (nameMatch) tempData.Name = nameMatch[1].trim();
-      
-      const cnicMatch = content.match(/CNIC[:\s]*([^<]*)/i);
-      if (cnicMatch) tempData.Cnic = cnicMatch[1].trim();
-      
-      const mobileMatch = content.match(/Mobile[:\s]*([^<]*)/i);
-      if (mobileMatch) tempData.Mobile = mobileMatch[1].trim();
-      
-      const addressMatch = content.match(/Address[:\s]*([^<]*)/i);
-      if (addressMatch) tempData.Address = addressMatch[1].trim();
-      
-      if (tempData.Name && tempData.Mobile) {
-        tempResults.push({...tempData});
-        tempData = {};
+    while ((match = tdRegex.exec(html)) !== null) {
+      let content = match[1]
+        .replace(/<[^>]*>/g, '')
+        .replace(/&nbsp;/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (content) {
+        allCells.push(content);
       }
     }
     
-    if (tempResults.length > 0) return tempResults;
-
-    // Method 4: Direct text extraction (Last resort)
-    const text = html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
-    const lines = text.split(/\n|\.\s+/);
-    
-    let currentRecord = {};
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      
-      if (trimmed.match(/[A-Za-z]+\s+[A-Za-z]+/)) {
-        if (currentRecord.Name) {
-          if (currentRecord.Name && currentRecord.Mobile) {
-            results.push({...currentRecord});
-          }
-          currentRecord = {};
-        }
-        currentRecord.Name = trimmed;
-      } else if (trimmed.match(/[0-9]{13}/)) {
-        currentRecord.Cnic = trimmed;
-      } else if (trimmed.match(/03[0-9]{9}/)) {
-        currentRecord.Mobile = trimmed;
-      } else if (trimmed.length > 5) {
-        currentRecord.Address = trimmed;
+    for (let i = 0; i < allCells.length; i += 4) {
+      if (i + 3 < allCells.length) {
+        results.push({
+          Name: allCells[i] || 'N/A',
+          Cnic: allCells[i+1] || 'N/A',
+          Mobile: allCells[i+2] || 'N/A',
+          Address: allCells[i+3] || 'N/A'
+        });
       }
     }
     
-    if (currentRecord.Name && currentRecord.Mobile) {
-      results.push(currentRecord);
-    }
-
-    console.log(`✅ Parsed ${results.length} records`);
+    console.log(`✅ Alternative parser found ${results.length} records`);
     return results;
     
   } catch (error) {
@@ -316,9 +320,6 @@ function parsePaksimHTML(html) {
   }
 }
 
-// =============================================
-// 🔧 HELPER FUNCTIONS
-// =============================================
 function getSmartName(records) {
   const garbage = ['data not recieved from nadra', 'data not received from nadra', 'not received', 'no data', 'unknown', 'n/a', 'null', 'undefined', 'no', '-'];
   const names = records.map(r => r.Name).filter(n => n && n.trim().length > 0).map(n => n.trim());
@@ -357,4 +358,4 @@ function getAllNumbers(records) {
 function getAllCNICs(records) {
   const cnis = records.map(r => r.Cnic).filter(c => c && c.trim().length > 0).map(c => c.trim());
   return [...new Set(cnis)];
-                      }
+      }
