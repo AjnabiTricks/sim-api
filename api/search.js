@@ -78,12 +78,29 @@ export default async function handler(req, res) {
         const html = await response.text();
         console.log(`📄 HTML Length: ${html.length}`);
         
-        if (html.includes('No record found') || html.includes('No data found')) {
+        // Check if no data
+        if (html.includes('No record found') || html.includes('No data found') || html.includes('not found')) {
           console.log('⚠️ No record found');
           return [];
         }
         
-        return parsePaksimHTML(html);
+        // Parse using multiple methods
+        let parsed = parsePaksimHTML(html);
+        
+        // If first method fails, try alternative
+        if (!parsed || parsed.length === 0) {
+          console.log('⚠️ Primary parsing failed, trying method 2...');
+          parsed = parsePaksimHTMLAlt(html);
+        }
+        
+        // If still fails, try raw text extraction
+        if (!parsed || parsed.length === 0) {
+          console.log('⚠️ Method 2 failed, trying raw extraction...');
+          parsed = parseRawText(html);
+        }
+        
+        console.log(`✅ Parsed ${parsed ? parsed.length : 0} records`);
+        return parsed || [];
         
       } catch (error) {
         console.error('Search error:', error);
@@ -134,7 +151,8 @@ export default async function handler(req, res) {
       return res.status(404).json({
         success: false,
         error: 'No data found. Try another number.',
-        query: search
+        query: search,
+        suggestion: 'Number may not exist in database'
       });
     }
 
@@ -197,88 +215,183 @@ export default async function handler(req, res) {
 }
 
 // =============================================
-// 🔧 FIXED PARSER - Correct Column Mapping
+// 🔧 METHOD 1: Table Parser
 // =============================================
 function parsePaksimHTML(html) {
   try {
     const results = [];
     
-    // Find the table
-    const tableStart = html.indexOf('<table');
-    const tableEnd = html.indexOf('</table>', tableStart);
+    // Find any table
+    const tableRegex = /<table[^>]*>([\s\S]*?)<\/table>/gi;
+    let tableMatch;
     
-    if (tableStart === -1 || tableEnd === -1) {
-      console.log('❌ No table found');
-      return results;
-    }
-
-    const tableHTML = html.substring(tableStart, tableEnd + 8);
-    
-    // Extract rows
-    const rowRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
-    const cellRegex = /<td[^>]*>([\s\S]*?)<\/td>/gi;
-    
-    let rowMatch;
-    let isHeader = true;
-    let rowNumber = 0;
-    
-    while ((rowMatch = rowRegex.exec(tableHTML)) !== null) {
-      rowNumber++;
+    while ((tableMatch = tableRegex.exec(html)) !== null) {
+      const tableHTML = tableMatch[1];
       
-      // Skip header row
-      if (isHeader) {
-        isHeader = false;
-        continue;
-      }
+      // Find rows
+      const rowRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+      let rowMatch;
+      let isHeader = true;
       
-      const row = rowMatch[1];
-      const cells = [];
-      let cellMatch;
-      
-      while ((cellMatch = cellRegex.exec(row)) !== null) {
-        let content = cellMatch[1]
-          .replace(/<[^>]*>/g, '')
-          .replace(/&nbsp;/g, ' ')
-          .replace(/\s+/g, ' ')
-          .trim();
-        cells.push(content);
-      }
-      
-      console.log(`Row ${rowNumber} cells:`, cells);
-      
-      // Check if we have at least 4 cells
-      if (cells.length >= 4) {
-        // Clean each field
-        const name = cells[0] || 'N/A';
-        const cnic = cells[1] || 'N/A';
-        const mobile = cells[2] || 'N/A';
-        const address = cells[3] || 'N/A';
+      while ((rowMatch = rowRegex.exec(tableHTML)) !== null) {
+        if (isHeader) {
+          isHeader = false;
+          continue;
+        }
         
-        // Filter out header-like data
-        if (name && 
-            name !== 'Name' && 
-            name !== 'CNIC' && 
-            name !== 'MobileNo' && 
-            name !== 'Address' &&
-            name !== 'Mobile' &&
-            name !== 'S.No' &&
-            !name.includes('search')) {
+        const cells = [];
+        const cellRegex = /<td[^>]*>([\s\S]*?)<\/td>/gi;
+        let cellMatch;
+        
+        while ((cellMatch = cellRegex.exec(rowMatch[1])) !== null) {
+          let content = cellMatch[1]
+            .replace(/<[^>]*>/g, '')
+            .replace(/&nbsp;/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+          if (content) {
+            cells.push(content);
+          }
+        }
+        
+        // Check if this is a valid data row (has at least 3 cells)
+        if (cells.length >= 3) {
+          // Determine which cell is which
+          let name = 'N/A', cnic = 'N/A', mobile = 'N/A', address = 'N/A';
           
-          results.push({
-            Name: name,
-            Cnic: cnic,
-            Mobile: mobile,
-            Address: address
-          });
+          // Try to identify columns by content
+          for (let i = 0; i < cells.length; i++) {
+            const cell = cells[i];
+            if (cell.match(/^[0-9]{13}$/)) {
+              cnic = cell;
+            } else if (cell.match(/^03[0-9]{9}$/)) {
+              mobile = cell;
+            } else if (cell.match(/[A-Za-z]/) && cell.length > 2 && !cell.match(/^[0-9]+$/)) {
+              if (name === 'N/A') {
+                name = cell;
+              } else {
+                address = cell;
+              }
+            }
+          }
+          
+          // If we have at least name and mobile, add record
+          if (name !== 'N/A' && mobile !== 'N/A') {
+            results.push({ Name: name, Cnic: cnic, Mobile: mobile, Address: address });
+          }
         }
       }
     }
     
-    console.log(`✅ Parser found ${results.length} valid records`);
     return results;
-    
   } catch (error) {
-    console.error('Parse error:', error);
+    console.error('Table parser error:', error);
+    return [];
+  }
+}
+
+// =============================================
+// 🔧 METHOD 2: Alternative Parser
+// =============================================
+function parsePaksimHTMLAlt(html) {
+  try {
+    const results = [];
+    
+    // Extract all text between tags
+    const text = html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+    
+    // Look for patterns
+    const lines = text.split(/[.\n]/);
+    let currentRecord = {};
+    
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.length < 3) continue;
+      
+      // Check for CNIC (13 digits)
+      const cnicMatch = trimmed.match(/\b([0-9]{13})\b/);
+      if (cnicMatch) {
+        currentRecord.Cnic = cnicMatch[1];
+        continue;
+      }
+      
+      // Check for Mobile (11 digits starting with 03)
+      const mobileMatch = trimmed.match(/\b(03[0-9]{9})\b/);
+      if (mobileMatch) {
+        currentRecord.Mobile = mobileMatch[1];
+        continue;
+      }
+      
+      // Check for Name (alphabetic, 2+ words)
+      if (trimmed.match(/^[A-Za-z]+ [A-Za-z]+/)) {
+        if (currentRecord.Name && currentRecord.Mobile) {
+          results.push({...currentRecord});
+          currentRecord = {};
+        }
+        currentRecord.Name = trimmed;
+        continue;
+      }
+      
+      // Check for Address (long text with numbers)
+      if (trimmed.length > 20 && trimmed.match(/[0-9]/)) {
+        currentRecord.Address = trimmed;
+      }
+    }
+    
+    // Add last record if complete
+    if (currentRecord.Name && currentRecord.Mobile) {
+      results.push(currentRecord);
+    }
+    
+    return results;
+  } catch (error) {
+    console.error('Alt parser error:', error);
+    return [];
+  }
+}
+
+// =============================================
+// 🔧 METHOD 3: Raw Text Extraction
+// =============================================
+function parseRawText(html) {
+  try {
+    const results = [];
+    
+    // Remove scripts and styles
+    const clean = html.replace(/<script[\s\S]*?<\/script>/gi, '')
+                     .replace(/<style[\s\S]*?<\/style>/gi, '');
+    
+    // Extract all text
+    const text = clean.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+    
+    // Find all 13-digit numbers (CNIC)
+    const cnicMatches = text.match(/\b([0-9]{13})\b/g) || [];
+    // Find all 11-digit numbers starting with 03 (Mobile)
+    const mobileMatches = text.match(/\b(03[0-9]{9})\b/g) || [];
+    
+    // Find names (2+ words, alphabetic)
+    const nameMatches = text.match(/\b([A-Z][a-z]+ [A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b/g) || [];
+    
+    // Find addresses (long text with numbers and words)
+    const addressMatches = text.match(/\b([A-Z][a-z]+ [0-9]+ [A-Za-z\s,]+)/g) || [];
+    
+    // Combine into records
+    const maxLen = Math.max(cnicMatches.length, mobileMatches.length, nameMatches.length);
+    
+    for (let i = 0; i < maxLen; i++) {
+      const name = nameMatches[i] || 'Unknown';
+      const cnic = cnicMatches[i] || 'N/A';
+      const mobile = mobileMatches[i] || 'N/A';
+      const address = addressMatches[i] || 'No address';
+      
+      if (mobile !== 'N/A') {
+        results.push({ Name: name, Cnic: cnic, Mobile: mobile, Address: address });
+      }
+    }
+    
+    return results;
+  } catch (error) {
+    console.error('Raw parser error:', error);
     return [];
   }
 }
@@ -371,4 +484,4 @@ function getAllCNICs(records) {
     .filter(c => c && c.toString().trim().length > 0)
     .map(c => c.toString().trim());
   return [...new Set(cnis)];
-            }
+        }
