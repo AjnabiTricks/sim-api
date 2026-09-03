@@ -28,21 +28,18 @@ export default async function handler(req, res) {
   // --- PHONE NUMBER FORMATTING ---
   let phoneNumber = cleanInput;
 
-  // Remove country code (92 or 923)
   if (phoneNumber.startsWith('923')) {
     phoneNumber = phoneNumber.substring(3);
   } else if (phoneNumber.startsWith('92')) {
     phoneNumber = phoneNumber.substring(2);
   }
 
-  // Add leading 0 if missing
   if (/^3[0-9]{9}$/.test(phoneNumber)) {
     phoneNumber = '0' + phoneNumber;
   } else if (/^[0-9]{10}$/.test(phoneNumber) && phoneNumber.startsWith('3')) {
     phoneNumber = '0' + phoneNumber;
   }
 
-  // Validate phone number (must be 11 digits starting with 03)
   if (!/^03[0-9]{9}$/.test(phoneNumber)) {
     return res.status(400).json({
       success: false,
@@ -51,7 +48,8 @@ export default async function handler(req, res) {
   }
 
   try {
-    // --- FETCH FROM PAKSIM.INFO ---
+    console.log(`🔍 Searching for: ${phoneNumber}`);
+
     const paksimResponse = await fetch('https://paksim.info/sim-database-online-2022-result.php', {
       method: 'POST',
       headers: {
@@ -80,23 +78,41 @@ export default async function handler(req, res) {
     });
 
     if (!paksimResponse.ok) {
+      console.error(`❌ HTTP Error: ${paksimResponse.status}`);
       throw new Error(`HTTP error! status: ${paksimResponse.status}`);
     }
 
     const html = await paksimResponse.text();
     
-    // --- PARSE HTML ---
-    const parsedData = parsePaksimHTML(html);
+    // --- DEBUG: Log HTML ---
+    console.log(`📄 HTML Length: ${html.length}`);
+    console.log(`📄 HTML Preview (first 1000 chars):\n${html.substring(0, 1000)}...`);
+
+    // --- PARSE HTML using multiple methods ---
+    let parsedData = parsePaksimHTML(html);
+    
+    // If first method fails, try alternative
+    if (!parsedData || parsedData.length === 0) {
+      console.log('⚠️ Primary parsing failed, trying alternative method...');
+      parsedData = parsePaksimHTMLAlt(html);
+    }
+
+    console.log(`📊 Parsed Data Count: ${parsedData ? parsedData.length : 0}`);
 
     if (!parsedData || parsedData.length === 0) {
+      // Return HTML snippet for debugging
       return res.status(404).json({
         success: false,
         error: 'No data found for this phone number',
-        query: phoneNumber
+        query: phoneNumber,
+        debug: {
+          htmlLength: html.length,
+          htmlSnippet: html.substring(0, 500)
+        }
       });
     }
 
-    // --- REMOVE DUPLICATES (by CNIC or Name) ---
+    // --- REMOVE DUPLICATES ---
     const seenRecords = new Set();
     const uniqueData = parsedData.filter(item => {
       const key = `${item.Cnic}_${item.Name}`;
@@ -110,7 +126,6 @@ export default async function handler(req, res) {
     // --- FORMAT RESPONSE ---
     let formattedData;
     if (uniqueData.length === 1) {
-      // Single record: return object
       const item = uniqueData[0];
       formattedData = {
         Name: item.Name,
@@ -119,7 +134,6 @@ export default async function handler(req, res) {
         Address: item.Address
       };
     } else {
-      // Multiple records: return array
       formattedData = uniqueData.map(item => ({
         Name: item.Name,
         Cnic: item.Cnic,
@@ -156,22 +170,23 @@ export default async function handler(req, res) {
   }
 }
 
-// --- HELPER: Parse paksim.info HTML ---
+// --- METHOD 1: Regex-based parsing ---
 function parsePaksimHTML(html) {
   try {
     const results = [];
     
-    // Find the table with results
+    // Find table
     const tableStart = html.indexOf('<table');
     const tableEnd = html.indexOf('</table>', tableStart);
     
     if (tableStart === -1 || tableEnd === -1) {
+      console.log('❌ No table found');
       return results;
     }
-    
+
     const tableHTML = html.substring(tableStart, tableEnd + 8);
     
-    // Extract all rows
+    // Extract rows
     const rowRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
     const cellRegex = /<td[^>]*>([\s\S]*?)<\/td>/gi;
     
@@ -179,7 +194,6 @@ function parsePaksimHTML(html) {
     let isHeader = true;
     
     while ((rowMatch = rowRegex.exec(tableHTML)) !== null) {
-      // Skip header row
       if (isHeader) {
         isHeader = false;
         continue;
@@ -191,14 +205,13 @@ function parsePaksimHTML(html) {
       
       while ((cellMatch = cellRegex.exec(row)) !== null) {
         let content = cellMatch[1]
-          .replace(/<[^>]*>/g, '') // Remove HTML tags
+          .replace(/<[^>]*>/g, '')
           .replace(/&nbsp;/g, ' ')
           .replace(/\s+/g, ' ')
           .trim();
         cells.push(content);
       }
       
-      // Expecting at least 4 columns: Name, CNIC, Mobile, Address
       if (cells.length >= 4) {
         results.push({
           Name: cells[0] || 'N/A',
@@ -211,7 +224,47 @@ function parsePaksimHTML(html) {
     
     return results;
   } catch (error) {
-    console.error('HTML parsing error:', error);
+    console.error('Parse error:', error);
     return null;
   }
-        }
+}
+
+// --- METHOD 2: Alternative parsing (simple string split) ---
+function parsePaksimHTMLAlt(html) {
+  try {
+    const results = [];
+    
+    // Look for pattern: <td>Name</td><td>CNIC</td><td>Mobile</td><td>Address</td>
+    const tdRegex = /<td[^>]*>([\s\S]*?)<\/td>/gi;
+    const allCells = [];
+    let match;
+    
+    while ((match = tdRegex.exec(html)) !== null) {
+      let content = match[1]
+        .replace(/<[^>]*>/g, '')
+        .replace(/&nbsp;/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (content) {
+        allCells.push(content);
+      }
+    }
+    
+    // Group cells into records (4 cells per record)
+    for (let i = 0; i < allCells.length; i += 4) {
+      if (i + 3 < allCells.length) {
+        results.push({
+          Name: allCells[i] || 'N/A',
+          Cnic: allCells[i+1] || 'N/A',
+          Mobile: allCells[i+2] || 'N/A',
+          Address: allCells[i+3] || 'N/A'
+        });
+      }
+    }
+    
+    return results;
+  } catch (error) {
+    console.error('Alt parse error:', error);
+    return null;
+  }
+}
