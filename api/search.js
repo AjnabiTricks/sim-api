@@ -16,12 +16,8 @@ export default async function handler(req, res) {
     });
   }
 
-  // =============================================
-  // 🔧 INPUT CLEANING & FORMAT DETECTION
-  // =============================================
+  // --- CLEAN INPUT ---
   let rawInput = search.trim();
-  
-  // Remove spaces, dashes, parentheses, plus signs
   let cleanInput = rawInput
     .replace(/\s/g, '')
     .replace(/-/g, '')
@@ -31,70 +27,47 @@ export default async function handler(req, res) {
 
   console.log(`🔍 Raw: ${rawInput}, Cleaned: ${cleanInput}`);
 
-  // =============================================
-  // 📱 PHONE NUMBER FORMATS SUPPORTED
-  // =============================================
-  // 1. 03XXXXXXXXX (11 digits)
-  // 2. 3XXXXXXXXX (10 digits)
-  // 3. 923XXXXXXXXX (12 digits)
-  // 4. 92 3XXXXXXXXX (with space)
-  // 5. +923XXXXXXXXX (with +)
-  // 6. 00923XXXXXXXXX (with 00)
-  // 7. 03XX-XXXXXXX (with dash)
-  // 8. (03XX) XXXXXXX (with parentheses)
-  
   let isCNIC = false;
-  let phoneNumber = cleanInput;
   let queryForAPI = cleanInput;
 
-  // Check if input is CNIC (13 digits)
+  // Check CNIC (13 digits)
   if (/^[0-9]{13}$/.test(cleanInput)) {
     isCNIC = true;
     queryForAPI = cleanInput;
     console.log(`✅ Detected CNIC: ${queryForAPI}`);
   } 
-  // Check if input is Phone Number
+  // Check Phone Number
   else {
-    // Remove country code if present
+    let phoneNumber = cleanInput;
+
+    // Remove country code
     if (phoneNumber.startsWith('923')) {
       phoneNumber = phoneNumber.substring(3);
     } else if (phoneNumber.startsWith('92')) {
       phoneNumber = phoneNumber.substring(2);
     }
-    
+
     // Handle 10-digit numbers (starting with 3)
     if (/^3[0-9]{9}$/.test(phoneNumber)) {
       phoneNumber = '0' + phoneNumber;
     }
-    // Handle 10-digit numbers (starting with 03 but missing one digit)
-    else if (/^03[0-9]{8}$/.test(phoneNumber)) {
-      // Add a zero if needed (rare case)
-      phoneNumber = phoneNumber.substring(0, 2) + '0' + phoneNumber.substring(2);
-    }
-    
-    // Final validation: must be 11 digits starting with 03
+
+    // Final validation: 11 digits starting with 03
     if (!/^03[0-9]{9}$/.test(phoneNumber)) {
-      // Try one more format: if it's 10 digits and starts with 3
-      if (/^[0-9]{10}$/.test(phoneNumber) && phoneNumber.startsWith('3')) {
-        phoneNumber = '0' + phoneNumber;
-      } else {
-        return res.status(400).json({
-          success: false,
-          error: 'Invalid phone number format.',
-          supportedFormats: [
-            '03XXXXXXXXX (11 digits)',
-            '3XXXXXXXXX (10 digits)',
-            '923XXXXXXXXX (12 digits)',
-            '+923XXXXXXXXX',
-            '00923XXXXXXXXX',
-            '03XX-XXXXXXX',
-            '(03XX) XXXXXXX'
-          ],
-          example: '03479876199 or 923479876199 or +923479876199'
-        });
-      }
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid phone number format.',
+        supportedFormats: [
+          '03XXXXXXXXX (11 digits)',
+          '3XXXXXXXXX (10 digits)',
+          '923XXXXXXXXX (12 digits)',
+          '+923XXXXXXXXX',
+          '00923XXXXXXXXX'
+        ],
+        example: '03479876199 or 923479876199'
+      });
     }
-    
+
     queryForAPI = phoneNumber;
     console.log(`✅ Detected Phone: ${queryForAPI}`);
   }
@@ -111,18 +84,11 @@ export default async function handler(req, res) {
         const response = await fetch(url, {
           method: 'POST',
           headers: {
-            'host': 'paksimdatabases.com',
             'content-type': 'application/x-www-form-urlencoded',
             'user-agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Mobile Safari/537.36',
             'origin': 'https://paksimdatabases.com',
             'referer': 'https://paksimdatabases.com/',
-            'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-            'accept-language': 'ur,en-US;q=0.9,en;q=0.8',
-            'cache-control': 'max-age=0',
-            'sec-ch-ua': '"Not(A:Brand";v="8", "Chromium";v="144", "Google Chrome";v="144"',
-            'sec-ch-ua-mobile': '?1',
-            'sec-ch-ua-platform': '"Android"',
-            'upgrade-insecure-requests': '1'
+            'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8'
           },
           body: new URLSearchParams({
             numberCnic: query,
@@ -138,7 +104,7 @@ export default async function handler(req, res) {
         const html = await response.text();
         console.log(`📄 HTML Length: ${html.length}`);
         
-        if (html.includes('No record found') || html.includes('No data found') || html.includes('not found')) {
+        if (html.includes('No record found') || html.includes('No data found')) {
           console.log('⚠️ No record found');
           return [];
         }
@@ -165,7 +131,7 @@ export default async function handler(req, res) {
     if (initialRecords.length > 0) {
       allRecords = initialRecords;
       
-      // Extract CNIC from results
+      // Extract CNIC
       const cnis = getAllCNICs(initialRecords);
       if (cnis.length > 0) {
         detectedCNIC = cnis[0];
@@ -193,8 +159,7 @@ export default async function handler(req, res) {
       return res.status(404).json({
         success: false,
         error: 'No data found. Try another number.',
-        query: search,
-        suggestion: 'Number may not exist in database'
+        query: search
       });
     }
 
@@ -209,8 +174,6 @@ export default async function handler(req, res) {
       return false;
     });
 
-    console.log(`📊 Total unique records: ${uniqueData.length}`);
-
     // =============================================
     // 🔥 SMART FILTERS
     // =============================================
@@ -224,7 +187,7 @@ export default async function handler(req, res) {
     // =============================================
     const finalResponse = {
       success: true,
-      query: isCNIC ? cleanInput : phoneNumber,
+      query: isCNIC ? cleanInput : queryForAPI,
       detectedType: isCNIC ? 'cnic' : 'phone',
       data: {
         name: finalName,
@@ -257,13 +220,11 @@ export default async function handler(req, res) {
 }
 
 // =============================================
-// 🔧 PAKSIMDATABASES HTML PARSER
+// 🔧 PARSER & HELPERS (Same as before)
 // =============================================
 function parsePaksimDatabasesHTML(html) {
   try {
     const results = [];
-    
-    // Find table
     const tableRegex = /<table[^>]*>([\s\S]*?)<\/table>/gi;
     let tableMatch;
     
@@ -289,9 +250,7 @@ function parsePaksimDatabasesHTML(html) {
             .replace(/&nbsp;/g, ' ')
             .replace(/\s+/g, ' ')
             .trim();
-          if (content) {
-            cells.push(content);
-          }
+          if (content) cells.push(content);
         }
         
         if (cells.length >= 3) {
@@ -299,16 +258,11 @@ function parsePaksimDatabasesHTML(html) {
           
           for (let i = 0; i < cells.length; i++) {
             const cell = cells[i];
-            if (cell.match(/^[0-9]{13}$/)) {
-              cnic = cell;
-            } else if (cell.match(/^03[0-9]{9}$/)) {
-              mobile = cell;
-            } else if (cell.match(/[A-Za-z]/) && cell.length > 2 && !cell.match(/^[0-9]+$/)) {
-              if (name === 'N/A') {
-                name = cell;
-              } else if (address === 'N/A') {
-                address = cell;
-              }
+            if (cell.match(/^[0-9]{13}$/)) cnic = cell;
+            else if (cell.match(/^03[0-9]{9}$/)) mobile = cell;
+            else if (cell.match(/[A-Za-z]/) && cell.length > 2 && !cell.match(/^[0-9]+$/)) {
+              if (name === 'N/A') name = cell;
+              else if (address === 'N/A') address = cell;
             }
           }
           
@@ -328,25 +282,18 @@ function parsePaksimDatabasesHTML(html) {
       console.log('⚠️ Table parsing failed, trying alternative...');
       return parseAlternative(html);
     }
-    
     return results;
-    
   } catch (error) {
     console.error('Parser error:', error);
     return [];
   }
 }
 
-// =============================================
-// 🔧 ALTERNATIVE PARSER
-// =============================================
 function parseAlternative(html) {
   try {
     const results = [];
-    
     const clean = html.replace(/<script[\s\S]*?<\/script>/gi, '')
                      .replace(/<style[\s\S]*?<\/style>/gi, '');
-    
     const text = clean.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
     
     const cnicMatches = text.match(/\b([0-9]{13})\b/g) || [];
@@ -354,11 +301,7 @@ function parseAlternative(html) {
     const nameMatches = text.match(/\b([A-Z][a-z]+ [A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b/g) || [];
     const addressMatches = text.match(/\b([A-Z][a-z]+ [0-9]+ [A-Za-z\s,]+)/g) || [];
     
-    const maxLen = Math.max(
-      cnicMatches.length,
-      mobileMatches.length,
-      nameMatches.length
-    );
+    const maxLen = Math.max(cnicMatches.length, mobileMatches.length, nameMatches.length);
     
     for (let i = 0; i < maxLen; i++) {
       const name = nameMatches[i] || 'Unknown';
@@ -375,107 +318,47 @@ function parseAlternative(html) {
         });
       }
     }
-    
     return results;
-    
   } catch (error) {
     console.error('Alternative parser error:', error);
     return [];
   }
 }
 
-// =============================================
-// 🔧 SMART HELPER FUNCTIONS
-// =============================================
-
 function getSmartName(records) {
-  const garbage = [
-    'data not recieved from nadra',
-    'data not received from nadra',
-    'not received',
-    'no data',
-    'unknown',
-    'n/a',
-    'null',
-    'undefined',
-    'no',
-    '-',
-    'cnic',
-    'mobile',
-    'address',
-    'search',
-    'not found'
-  ];
-  
-  const names = records
-    .map(r => r.Name)
-    .filter(n => n && n.toString().trim().length > 0)
-    .map(n => n.toString().trim());
-  
+  const garbage = ['data not recieved from nadra', 'not received', 'no data', 'unknown', 'n/a', 'null', 'undefined', 'no', '-', 'cnic', 'mobile', 'address', 'search'];
+  const names = records.map(r => r.Name).filter(n => n && n.trim().length > 0).map(n => n.trim());
   if (names.length === 0) return 'Unknown';
   
-  const validNames = names.filter(name => {
-    const lower = name.toLowerCase();
-    return !garbage.some(g => lower.includes(g));
-  });
+  const valid = names.filter(n => !garbage.some(g => n.toLowerCase().includes(g)));
+  if (valid.length === 0) return names[0];
   
-  if (validNames.length === 0) {
-    return names[0];
-  }
-  
-  const nameCount = {};
-  validNames.forEach(name => {
-    nameCount[name] = (nameCount[name] || 0) + 1;
-  });
-  
-  let mostCommon = validNames[0];
-  let maxCount = 0;
-  Object.keys(nameCount).forEach(name => {
-    if (nameCount[name] > maxCount) {
-      maxCount = nameCount[name];
-      mostCommon = name;
-    }
-  });
-  
-  return mostCommon;
+  const count = {};
+  valid.forEach(n => count[n] = (count[n] || 0) + 1);
+  return Object.keys(count).reduce((a, b) => count[a] > count[b] ? a : b);
 }
 
 function getSmartAddress(records) {
-  const garbage = ['no', 'n/a', 'null', 'undefined', '-', 'na', 'no address', 'none', 'nill'];
+  const garbage = ['no', 'n/a', 'null', 'undefined', '-', 'na', 'no address'];
+  let best = 'No address available';
+  let maxLen = 0;
   
-  let bestAddress = 'No address available';
-  let maxLength = 0;
-  
-  records.forEach(record => {
-    if (record.Address && record.Address.toString().trim().length > 0) {
-      const addr = record.Address.toString().trim();
-      const lower = addr.toLowerCase();
-      
-      if (garbage.includes(lower)) return;
-      
-      if (addr.length > maxLength) {
-        maxLength = addr.length;
-        bestAddress = addr;
+  records.forEach(r => {
+    if (r.Address && r.Address.trim().length > 0) {
+      const addr = r.Address.trim();
+      if (!garbage.includes(addr.toLowerCase()) && addr.length > maxLen) {
+        maxLen = addr.length;
+        best = addr;
       }
     }
   });
-  
-  return bestAddress;
+  return best;
 }
 
 function getAllNumbers(records) {
-  const numbers = records
-    .map(r => r.Mobile)
-    .filter(n => n && n.toString().trim().length > 0)
-    .map(n => n.toString().trim());
-  return [...new Set(numbers)];
+  return [...new Set(records.map(r => r.Mobile).filter(n => n && n.trim().length > 0).map(n => n.trim()))];
 }
 
 function getAllCNICs(records) {
-  const cnis = records
-    .map(r => r.Cnic)
-    .filter(c => c && c.toString().trim().length > 0)
-    .map(c => c.toString().trim())
-    .filter(c => c.length >= 13);
-  return [...new Set(cnis)];
-                                                         }
+  return [...new Set(records.map(r => r.Cnic).filter(c => c && c.trim().length >= 13).map(c => c.trim()))];
+            }
