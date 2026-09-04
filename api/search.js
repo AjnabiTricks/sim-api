@@ -1,5 +1,5 @@
 export default async function handler(req, res) {
-  // 🔥 FORCE NO CACHE - Har level par
+  // Disable caching
   res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate, private');
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Expires', '0');
@@ -51,34 +51,33 @@ export default async function handler(req, res) {
     console.log(`🔍 Searching: ${isCNIC ? 'CNIC' : 'Phone'}: ${searchQuery}`);
 
     // =============================================
-    // 📞 API CALL WITH RETRY LOGIC
+    // 📞 API CALL WITH TIMEOUT & RETRY
     // =============================================
-    async function callAPI(query, retryCount = 0) {
+    async function callAPIWithTimeout(query, timeoutMs = 8000) {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+      
       try {
-        // 🔥 UNIQUE TIMESTAMP - Har request alag
         const timestamp = Date.now() + Math.random() * 1000;
         const url = `https://paksimsdata.pro/api2.php?number=${query}&_=${timestamp}`;
-        console.log(`📡 [Attempt ${retryCount + 1}] Fetching: ${url}`);
+        console.log(`📡 Fetching: ${url}`);
         
         const response = await fetch(url, {
+          signal: controller.signal,
           headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Cache-Control': 'no-cache, no-store, must-revalidate, max-age=0',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Cache-Control': 'no-cache, no-store, must-revalidate',
             'Pragma': 'no-cache',
             'Expires': '0',
-            'Accept': 'application/json, text/plain, */*'
+            'Accept': 'application/json'
           }
         });
 
+        clearTimeout(timeoutId);
+
         if (!response.ok) {
           console.log(`HTTP Error: ${response.status}`);
-          // Retry if not 404
-          if (response.status !== 404 && retryCount < 2) {
-            console.log(`🔄 Retry ${retryCount + 1}...`);
-            await new Promise(resolve => setTimeout(resolve, 1000));
-            return callAPI(query, retryCount + 1);
-          }
-          return [];
+          return { success: false, data: [] };
         }
 
         const data = await response.json();
@@ -94,42 +93,73 @@ export default async function handler(req, res) {
           });
           
           if (validRecords.length > 0) {
-            return validRecords.map(item => ({
-              Name: item.Name || 'Unknown',
-              Cnic: item.CNIC || 'N/A',
-              Mobile: item.Mobile || 'N/A',
-              Address: item.ADDRESS || item.address || 'No address'
-            }));
+            return { 
+              success: true, 
+              data: validRecords.map(item => ({
+                Name: item.Name || 'Unknown',
+                Cnic: item.CNIC || 'N/A',
+                Mobile: item.Mobile || 'N/A',
+                Address: item.ADDRESS || item.address || 'No address'
+              }))
+            };
           }
         } else if (data && typeof data === 'object' && data.Name && data.Mobile) {
           const item = data;
           if (item.Mobile && item.Mobile !== 'N/A' && item.Name && item.Name !== 'Unknown') {
-            return [{
-              Name: item.Name || 'Unknown',
-              Cnic: item.CNIC || 'N/A',
-              Mobile: item.Mobile || 'N/A',
-              Address: item.ADDRESS || item.address || 'No address'
-            }];
+            return { 
+              success: true, 
+              data: [{
+                Name: item.Name || 'Unknown',
+                Cnic: item.CNIC || 'N/A',
+                Mobile: item.Mobile || 'N/A',
+                Address: item.ADDRESS || item.address || 'No address'
+              }]
+            };
           }
         }
         
-        // Retry if empty response
-        if (retryCount < 2) {
-          console.log(`🔄 Empty response, retry ${retryCount + 1}...`);
-          await new Promise(resolve => setTimeout(resolve, 1500));
-          return callAPI(query, retryCount + 1);
+        return { success: false, data: [] };
+      } catch (error) {
+        clearTimeout(timeoutId);
+        if (error.name === 'AbortError') {
+          console.log('⏰ Request timeout');
+          return { success: false, error: 'timeout', data: [] };
+        }
+        console.error('API Error:', error);
+        return { success: false, error: error.message, data: [] };
+      }
+    }
+
+    // =============================================
+    // 🔍 SEARCH WITH RETRY LOGIC
+    // =============================================
+    async function searchWithRetry(query, maxRetries = 2) {
+      let lastError = null;
+      
+      for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        const result = await callAPIWithTimeout(query, 8000);
+        
+        if (result.success && result.data.length > 0) {
+          return result.data;
         }
         
-        return [];
-      } catch (error) {
-        console.error('API Error:', error);
-        if (retryCount < 2) {
-          console.log(`🔄 Error, retry ${retryCount + 1}...`);
-          await new Promise(resolve => setTimeout(resolve, 2000));
-          return callAPI(query, retryCount + 1);
+        if (result.error === 'timeout') {
+          console.log(`⏰ Timeout, retry ${attempt + 1}/${maxRetries}`);
+        } else {
+          console.log(`⚠️ Attempt ${attempt + 1} failed: ${result.error || 'empty'}`);
         }
-        return [];
+        
+        if (attempt < maxRetries) {
+          // Wait before retry (exponential backoff)
+          const delay = Math.pow(2, attempt) * 1000;
+          console.log(`⏳ Waiting ${delay}ms before retry...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
+        lastError = result.error;
       }
+      
+      console.log(`❌ All ${maxRetries + 1} attempts failed`);
+      return [];
     }
 
     // =============================================
@@ -139,7 +169,7 @@ export default async function handler(req, res) {
     let detectedCNIC = null;
 
     // First search with retry
-    let initialRecords = await callAPI(searchQuery);
+    let initialRecords = await searchWithRetry(searchQuery);
     
     if (initialRecords.length > 0) {
       allRecords = initialRecords;
@@ -151,7 +181,7 @@ export default async function handler(req, res) {
         console.log(`📌 Found CNIC: ${detectedCNIC}`);
         
         // Get ALL numbers for this CNIC with retry
-        const cnicRecords = await callAPI(detectedCNIC);
+        const cnicRecords = await searchWithRetry(detectedCNIC);
         if (cnicRecords.length > 0) {
           const existingNumbers = new Set(allRecords.map(r => r.Mobile));
           cnicRecords.forEach(record => {
@@ -238,9 +268,8 @@ export default async function handler(req, res) {
 }
 
 // =============================================
-// 🔧 SMART HELPER FUNCTIONS
+// 🔧 SMART HELPER FUNCTIONS (same as before)
 // =============================================
-
 function getSmartName(records) {
   const garbage = [
     'data not recieved from nadra',
@@ -331,4 +360,4 @@ function getAllCNICs(records) {
     .map(c => c.toString().trim())
     .filter(c => c.length >= 13);
   return [...new Set(cnis)];
-            }
+}
