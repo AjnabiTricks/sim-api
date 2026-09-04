@@ -1,8 +1,9 @@
 export default async function handler(req, res) {
-  // Disable caching completely
-  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  // 🔥 FORCE NO CACHE - Har level par
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate, private');
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Expires', '0');
+  res.setHeader('Surrogate-Control', 'no-store');
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -50,62 +51,83 @@ export default async function handler(req, res) {
     console.log(`🔍 Searching: ${isCNIC ? 'CNIC' : 'Phone'}: ${searchQuery}`);
 
     // =============================================
-    // 📞 PRIMARY API ONLY (PaksimsData.pro)
+    // 📞 API CALL WITH RETRY LOGIC
     // =============================================
-    async function searchPrimaryAPI(query) {
+    async function callAPI(query, retryCount = 0) {
       try {
-        const timestamp = Date.now();
+        // 🔥 UNIQUE TIMESTAMP - Har request alag
+        const timestamp = Date.now() + Math.random() * 1000;
         const url = `https://paksimsdata.pro/api2.php?number=${query}&_=${timestamp}`;
-        console.log(`📡 Fetching: ${url}`);
+        console.log(`📡 [Attempt ${retryCount + 1}] Fetching: ${url}`);
         
         const response = await fetch(url, {
           headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Cache-Control': 'no-cache, no-store, must-revalidate',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Cache-Control': 'no-cache, no-store, must-revalidate, max-age=0',
             'Pragma': 'no-cache',
-            'Expires': '0'
+            'Expires': '0',
+            'Accept': 'application/json, text/plain, */*'
           }
         });
 
         if (!response.ok) {
           console.log(`HTTP Error: ${response.status}`);
+          // Retry if not 404
+          if (response.status !== 404 && retryCount < 2) {
+            console.log(`🔄 Retry ${retryCount + 1}...`);
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            return callAPI(query, retryCount + 1);
+          }
           return [];
         }
 
         const data = await response.json();
         console.log(`✅ Received ${Array.isArray(data) ? data.length : 0} records`);
         
-        // Handle different response formats
+        // Validate data
         if (Array.isArray(data) && data.length > 0) {
-          return data
-            .filter(item => {
-              // 🔥 FILTER: Remove garbage records
-              const hasValidMobile = item.Mobile && item.Mobile !== 'N/A' && item.Mobile.toString().trim().length > 0;
-              const hasValidName = item.Name && item.Name !== 'Unknown' && item.Name.toString().trim().length > 0;
-              return hasValidMobile && hasValidName;
-            })
-            .map(item => ({
+          const validRecords = data.filter(item => {
+            const hasMobile = item.Mobile && item.Mobile !== 'N/A' && item.Mobile.toString().trim().length > 0;
+            const hasName = item.Name && item.Name !== 'Unknown' && item.Name.toString().trim().length > 0;
+            const hasCnic = item.CNIC && item.CNIC !== 'N/A' && item.CNIC.toString().trim().length >= 13;
+            return hasMobile && hasName && hasCnic;
+          });
+          
+          if (validRecords.length > 0) {
+            return validRecords.map(item => ({
               Name: item.Name || 'Unknown',
-              Cnic: item.CNIC || item.cnic || 'N/A',
+              Cnic: item.CNIC || 'N/A',
               Mobile: item.Mobile || 'N/A',
               Address: item.ADDRESS || item.address || 'No address'
             }));
-        } else if (data && typeof data === 'object' && data.Name) {
-          // Single object response
+          }
+        } else if (data && typeof data === 'object' && data.Name && data.Mobile) {
           const item = data;
           if (item.Mobile && item.Mobile !== 'N/A' && item.Name && item.Name !== 'Unknown') {
             return [{
               Name: item.Name || 'Unknown',
-              Cnic: item.CNIC || item.cnic || 'N/A',
+              Cnic: item.CNIC || 'N/A',
               Mobile: item.Mobile || 'N/A',
               Address: item.ADDRESS || item.address || 'No address'
             }];
           }
         }
         
+        // Retry if empty response
+        if (retryCount < 2) {
+          console.log(`🔄 Empty response, retry ${retryCount + 1}...`);
+          await new Promise(resolve => setTimeout(resolve, 1500));
+          return callAPI(query, retryCount + 1);
+        }
+        
         return [];
       } catch (error) {
         console.error('API Error:', error);
+        if (retryCount < 2) {
+          console.log(`🔄 Error, retry ${retryCount + 1}...`);
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          return callAPI(query, retryCount + 1);
+        }
         return [];
       }
     }
@@ -116,8 +138,8 @@ export default async function handler(req, res) {
     let allRecords = [];
     let detectedCNIC = null;
 
-    // First search
-    let initialRecords = await searchPrimaryAPI(searchQuery);
+    // First search with retry
+    let initialRecords = await callAPI(searchQuery);
     
     if (initialRecords.length > 0) {
       allRecords = initialRecords;
@@ -128,8 +150,8 @@ export default async function handler(req, res) {
         detectedCNIC = cnis[0];
         console.log(`📌 Found CNIC: ${detectedCNIC}`);
         
-        // Get ALL numbers for this CNIC
-        const cnicRecords = await searchPrimaryAPI(detectedCNIC);
+        // Get ALL numbers for this CNIC with retry
+        const cnicRecords = await callAPI(detectedCNIC);
         if (cnicRecords.length > 0) {
           const existingNumbers = new Set(allRecords.map(r => r.Mobile));
           cnicRecords.forEach(record => {
@@ -150,35 +172,14 @@ export default async function handler(req, res) {
       return res.status(404).json({
         success: false,
         error: 'No data found. Try another number.',
-        query: search
-      });
-    }
-
-    // 🔥 REMOVE GARBAGE RECORDS
-    const cleanedRecords = allRecords.filter(item => {
-      const hasValidMobile = item.Mobile && 
-                           item.Mobile !== 'N/A' && 
-                           item.Mobile !== 'No address' &&
-                           item.Mobile.toString().trim().length > 0;
-      const hasValidCnic = item.Cnic && 
-                           item.Cnic !== 'N/A' && 
-                           item.Cnic.toString().trim().length > 0;
-      return hasValidMobile && hasValidCnic;
-    });
-
-    console.log(`📊 Cleaned records: ${cleanedRecords.length} (from ${allRecords.length})`);
-
-    if (cleanedRecords.length === 0) {
-      return res.status(404).json({
-        success: false,
-        error: 'No valid data found. Try another number.',
-        query: search
+        query: search,
+        timestamp: Date.now()
       });
     }
 
     // Remove duplicates
     const seen = new Set();
-    const uniqueData = cleanedRecords.filter(item => {
+    const uniqueData = allRecords.filter(item => {
       const key = `${item.Cnic}_${item.Mobile}`;
       if (!seen.has(key)) {
         seen.add(key);
@@ -186,6 +187,8 @@ export default async function handler(req, res) {
       }
       return false;
     });
+
+    console.log(`📊 Total unique records: ${uniqueData.length}`);
 
     // =============================================
     // 🔥 SMART FILTERS
@@ -217,7 +220,8 @@ export default async function handler(req, res) {
         }))
       },
       credit: "AZ Tricks",
-      telegram: "https://t.me/AZ_Tricks"
+      telegram: "https://t.me/AZ_Tricks",
+      _timestamp: Date.now()
     };
 
     return res.status(200).json(finalResponse);
@@ -227,7 +231,8 @@ export default async function handler(req, res) {
     return res.status(500).json({
       success: false,
       error: 'Internal Server Error',
-      message: error.message
+      message: error.message,
+      timestamp: Date.now()
     });
   }
 }
@@ -326,4 +331,4 @@ function getAllCNICs(records) {
     .map(c => c.toString().trim())
     .filter(c => c.length >= 13);
   return [...new Set(cnis)];
-              }
+            }
