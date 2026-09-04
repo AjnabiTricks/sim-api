@@ -3,7 +3,6 @@ export default async function handler(req, res) {
   res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate, private');
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Expires', '0');
-  res.setHeader('Surrogate-Control', 'no-store');
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -51,9 +50,9 @@ export default async function handler(req, res) {
     console.log(`🔍 Searching: ${isCNIC ? 'CNIC' : 'Phone'}: ${searchQuery}`);
 
     // =============================================
-    // 📞 API CALL WITH TIMEOUT
+    // 📞 FAST API CALL (5 seconds timeout)
     // =============================================
-    async function callAPIWithTimeout(query, timeoutMs = 8000) {
+    async function callAPI(query, timeoutMs = 5000) {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
       
@@ -83,7 +82,7 @@ export default async function handler(req, res) {
         const data = await response.json();
         console.log(`✅ Received ${Array.isArray(data) ? data.length : 0} records`);
         
-        // Validate data - check if we have valid records
+        // Validate data
         let validRecords = [];
         if (Array.isArray(data) && data.length > 0) {
           validRecords = data.filter(item => {
@@ -120,7 +119,7 @@ export default async function handler(req, res) {
       } catch (error) {
         clearTimeout(timeoutId);
         if (error.name === 'AbortError') {
-          console.log('⏰ Request timeout');
+          console.log('⏰ Request timeout (5s)');
           return { success: false, data: [], error: 'timeout' };
         }
         console.error('API Error:', error);
@@ -129,15 +128,15 @@ export default async function handler(req, res) {
     }
 
     // =============================================
-    // 🔍 SEARCH WITH 5 RETRIES
+    // 🔍 SEARCH WITH FAST RETRY (3 retries, short delays)
     // =============================================
-    async function searchWithRetry(query, maxRetries = 5) {
+    async function searchWithFastRetry(query, maxRetries = 3) {
       let lastResult = null;
       
       for (let attempt = 0; attempt <= maxRetries; attempt++) {
         console.log(`🔄 Attempt ${attempt + 1}/${maxRetries + 1} for ${query}`);
         
-        const result = await callAPIWithTimeout(query, 8000);
+        const result = await callAPI(query, 5000); // 5s timeout
         
         if (result.success && result.data.length > 0) {
           console.log(`✅ Success on attempt ${attempt + 1}`);
@@ -145,9 +144,9 @@ export default async function handler(req, res) {
         }
         
         if (attempt < maxRetries) {
-          // Exponential backoff: 1s, 2s, 4s, 8s, 16s
-          const delay = Math.min(Math.pow(2, attempt) * 1000, 15000);
-          console.log(`⏳ No valid data. Waiting ${delay/1000}s before retry ${attempt + 2}...`);
+          // Fast backoff: 500ms, 1000ms, 1500ms
+          const delay = (attempt + 1) * 500;
+          console.log(`⏳ Waiting ${delay}ms before retry ${attempt + 2}...`);
           await new Promise(resolve => setTimeout(resolve, delay));
         }
         lastResult = result;
@@ -163,8 +162,8 @@ export default async function handler(req, res) {
     let allRecords = [];
     let detectedCNIC = null;
 
-    // First search with 5 retries
-    let initialRecords = await searchWithRetry(searchQuery, 5);
+    // First search with fast retry
+    let initialRecords = await searchWithFastRetry(searchQuery, 3);
     
     if (initialRecords.length > 0) {
       allRecords = initialRecords;
@@ -175,8 +174,8 @@ export default async function handler(req, res) {
         detectedCNIC = cnis[0];
         console.log(`📌 Found CNIC: ${detectedCNIC}`);
         
-        // Get ALL numbers for this CNIC with 5 retries
-        const cnicRecords = await searchWithRetry(detectedCNIC, 5);
+        // Get ALL numbers for this CNIC with fast retry
+        const cnicRecords = await searchWithFastRetry(detectedCNIC, 3);
         if (cnicRecords.length > 0) {
           const existingNumbers = new Set(allRecords.map(r => r.Mobile));
           cnicRecords.forEach(record => {
@@ -187,11 +186,11 @@ export default async function handler(req, res) {
           });
           console.log(`✅ Merged ${cnicRecords.length} records from CNIC search`);
         } else {
-          console.log(`⚠️ CNIC search failed after 5 retries, using initial data only`);
+          console.log(`⚠️ CNIC search failed after retries, using initial data only`);
         }
       }
     } else {
-      console.log(`❌ Initial search failed after 5 retries, returning 404`);
+      console.log(`❌ Initial search failed after retries, returning 404`);
     }
 
     // =============================================
@@ -200,7 +199,7 @@ export default async function handler(req, res) {
     if (!allRecords || allRecords.length === 0) {
       return res.status(404).json({
         success: false,
-        error: 'No data found after 5 retries. Try another number.',
+        error: 'No data found. Try another number.',
         query: search,
         timestamp: Date.now()
       });
