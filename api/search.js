@@ -74,65 +74,12 @@ export default async function handler(req, res) {
 
   try {
     // =============================================
-    // 📞 PRIMARY API: PaksimDatabases
-    // =============================================
-    async function searchPaksimDatabases(query) {
-      try {
-        const url = 'https://paksimdatabases.com/numberDetails.php';
-        console.log(`📡 [Primary] Fetching: ${query}`);
-        
-        const response = await fetch(url, {
-          method: 'POST',
-          headers: {
-            'host': 'paksimdatabases.com',
-            'content-type': 'application/x-www-form-urlencoded',
-            'user-agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Mobile Safari/537.36',
-            'origin': 'https://paksimdatabases.com',
-            'referer': 'https://paksimdatabases.com/',
-            'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-            'accept-language': 'ur,en-US;q=0.9,en;q=0.8',
-            'cache-control': 'max-age=0',
-            'sec-ch-ua': '"Not(A:Brand";v="8", "Chromium";v="144", "Google Chrome";v="144"',
-            'sec-ch-ua-mobile': '?1',
-            'sec-ch-ua-platform': '"Android"',
-            'upgrade-insecure-requests': '1'
-          },
-          body: new URLSearchParams({
-            numberCnic: query,
-            searchNumber: ''
-          })
-        });
-
-        if (!response.ok) {
-          console.log(`HTTP Error: ${response.status}`);
-          return [];
-        }
-
-        const html = await response.text();
-        console.log(`📄 HTML Length: ${html.length}`);
-        
-        if (html.includes('No record found') || html.includes('No data found') || html.includes('not found')) {
-          console.log('⚠️ No record found');
-          return [];
-        }
-        
-        const parsed = parsePaksimDatabasesHTML(html);
-        console.log(`✅ Parsed ${parsed.length} records`);
-        return parsed;
-        
-      } catch (error) {
-        console.error('Primary API error:', error);
-        return [];
-      }
-    }
-
-    // =============================================
-    // 📞 FALLBACK API: PaksimsData
+    // 📞 PRIMARY API: PaksimsData.pro (WORKING)
     // =============================================
     async function searchPaksimsData(query) {
       try {
         const url = `https://paksimsdata.pro/api2.php?number=${query}`;
-        console.log(`📡 [Fallback] Fetching: ${url}`);
+        console.log(`📡 [Primary] Fetching: ${url}`);
         
         const response = await fetch(url, {
           headers: {
@@ -166,27 +113,67 @@ export default async function handler(req, res) {
         
         return [];
       } catch (error) {
-        console.error('Fallback API error:', error);
+        console.error('Primary API error:', error);
         return [];
       }
     }
 
     // =============================================
-    // 🔍 SEARCH LOGIC WITH FALLBACK
+    // 📞 SECONDARY API: PaksimDatabases (CNIC Only)
+    // =============================================
+    async function searchPaksimDatabases(query) {
+      try {
+        const url = 'https://paksimdatabases.com/numberDetails.php';
+        console.log(`📡 [Secondary] Fetching CNIC: ${query}`);
+        
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'host': 'paksimdatabases.com',
+            'content-type': 'application/x-www-form-urlencoded',
+            'user-agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Mobile Safari/537.36',
+            'origin': 'https://paksimdatabases.com',
+            'referer': 'https://paksimdatabases.com/',
+            'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'accept-language': 'ur,en-US;q=0.9,en;q=0.8'
+          },
+          body: new URLSearchParams({
+            numberCnic: query,
+            searchNumber: ''
+          })
+        });
+
+        if (!response.ok) {
+          console.log(`HTTP Error: ${response.status}`);
+          return [];
+        }
+
+        const html = await response.text();
+        console.log(`📄 HTML Length: ${html.length}`);
+        
+        if (html.includes('No record found') || html.includes('No data found')) {
+          console.log('⚠️ No record found');
+          return [];
+        }
+        
+        const parsed = parsePaksimDatabasesHTML(html);
+        console.log(`✅ Parsed ${parsed.length} records`);
+        return parsed;
+        
+      } catch (error) {
+        console.error('Secondary API error:', error);
+        return [];
+      }
+    }
+
+    // =============================================
+    // 🔍 SEARCH LOGIC
     // =============================================
     let allRecords = [];
     let detectedCNIC = null;
-    let usedFallback = false;
 
-    // Try Primary API first
-    let initialRecords = await searchPaksimDatabases(queryForAPI);
-    
-    // If Primary fails, try Fallback
-    if (initialRecords.length === 0) {
-      console.log('⚠️ Primary API failed, trying fallback...');
-      initialRecords = await searchPaksimsData(queryForAPI);
-      usedFallback = true;
-    }
+    // ALWAYS use Primary API first (paksimsdata.pro)
+    let initialRecords = await searchPaksimsData(queryForAPI);
     
     if (initialRecords.length > 0) {
       allRecords = initialRecords;
@@ -197,17 +184,8 @@ export default async function handler(req, res) {
         detectedCNIC = cnis[0];
         console.log(`📌 Found CNIC: ${detectedCNIC}`);
         
-        // Get ALL numbers for this CNIC (try both APIs)
-        let cnicRecords = [];
-        
-        if (!usedFallback) {
-          cnicRecords = await searchPaksimDatabases(detectedCNIC);
-        }
-        
-        if (cnicRecords.length === 0) {
-          cnicRecords = await searchPaksimsData(detectedCNIC);
-        }
-        
+        // Use Secondary API (paksimdatabases.com) for CNIC search
+        const cnicRecords = await searchPaksimDatabases(detectedCNIC);
         if (cnicRecords.length > 0) {
           const existingNumbers = new Set(allRecords.map(r => r.Mobile));
           cnicRecords.forEach(record => {
@@ -219,6 +197,30 @@ export default async function handler(req, res) {
           console.log(`✅ Merged ${cnicRecords.length} records from CNIC search`);
         }
       }
+    } else {
+      // If Primary API fails, try Secondary for phone too
+      console.log('⚠️ Primary API failed, trying Secondary for phone...');
+      initialRecords = await searchPaksimDatabases(queryForAPI);
+      if (initialRecords.length > 0) {
+        allRecords = initialRecords;
+        
+        const cnis = getAllCNICs(initialRecords);
+        if (cnis.length > 0) {
+          detectedCNIC = cnis[0];
+          console.log(`📌 Found CNIC: ${detectedCNIC}`);
+          
+          const cnicRecords = await searchPaksimDatabases(detectedCNIC);
+          if (cnicRecords.length > 0) {
+            const existingNumbers = new Set(allRecords.map(r => r.Mobile));
+            cnicRecords.forEach(record => {
+              if (!existingNumbers.has(record.Mobile)) {
+                allRecords.push(record);
+                existingNumbers.add(record.Mobile);
+              }
+            });
+          }
+        }
+      }
     }
 
     // =============================================
@@ -228,8 +230,7 @@ export default async function handler(req, res) {
       return res.status(404).json({
         success: false,
         error: 'No data found. Try another number.',
-        query: search,
-        suggestion: 'Number may not exist in database'
+        query: search
       });
     }
 
@@ -434,4 +435,4 @@ function getAllNumbers(records) {
 
 function getAllCNICs(records) {
   return [...new Set(records.map(r => r.Cnic).filter(c => c && c.trim().length >= 13).map(c => c.trim()))];
-                              }
+}
