@@ -74,7 +74,7 @@ export default async function handler(req, res) {
 
   try {
     // =============================================
-    // 📞 SEARCH FUNCTION
+    // 📞 DIRECT API CALL - EXACT CURL PARAMETERS
     // =============================================
     async function searchPaksimDatabases(query) {
       try {
@@ -84,11 +84,18 @@ export default async function handler(req, res) {
         const response = await fetch(url, {
           method: 'POST',
           headers: {
+            'host': 'paksimdatabases.com',
             'content-type': 'application/x-www-form-urlencoded',
             'user-agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Mobile Safari/537.36',
             'origin': 'https://paksimdatabases.com',
             'referer': 'https://paksimdatabases.com/',
-            'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8'
+            'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'accept-language': 'ur,en-US;q=0.9,en;q=0.8',
+            'cache-control': 'max-age=0',
+            'sec-ch-ua': '"Not(A:Brand";v="8", "Chromium";v="144", "Google Chrome";v="144"',
+            'sec-ch-ua-mobile': '?1',
+            'sec-ch-ua-platform': '"Android"',
+            'upgrade-insecure-requests': '1'
           },
           body: new URLSearchParams({
             numberCnic: query,
@@ -103,12 +110,15 @@ export default async function handler(req, res) {
 
         const html = await response.text();
         console.log(`📄 HTML Length: ${html.length}`);
+        console.log(`📄 HTML Preview: ${html.substring(0, 500)}...`);
         
-        if (html.includes('No record found') || html.includes('No data found')) {
+        // Check if no data
+        if (html.includes('No record found') || html.includes('No data found') || html.includes('not found')) {
           console.log('⚠️ No record found');
           return [];
         }
         
+        // Parse HTML
         const parsed = parsePaksimDatabasesHTML(html);
         console.log(`✅ Parsed ${parsed.length} records`);
         return parsed;
@@ -131,7 +141,7 @@ export default async function handler(req, res) {
     if (initialRecords.length > 0) {
       allRecords = initialRecords;
       
-      // Extract CNIC
+      // Extract CNIC from results
       const cnis = getAllCNICs(initialRecords);
       if (cnis.length > 0) {
         detectedCNIC = cnis[0];
@@ -159,7 +169,8 @@ export default async function handler(req, res) {
       return res.status(404).json({
         success: false,
         error: 'No data found. Try another number.',
-        query: search
+        query: search,
+        suggestion: 'Number may not exist in database or try after some time'
       });
     }
 
@@ -173,6 +184,8 @@ export default async function handler(req, res) {
       }
       return false;
     });
+
+    console.log(`📊 Total unique records: ${uniqueData.length}`);
 
     // =============================================
     // 🔥 SMART FILTERS
@@ -220,11 +233,13 @@ export default async function handler(req, res) {
 }
 
 // =============================================
-// 🔧 PARSER & HELPERS (Same as before)
+// 🔧 PAKSIMDATABASES HTML PARSER
 // =============================================
 function parsePaksimDatabasesHTML(html) {
   try {
     const results = [];
+    
+    // Find table
     const tableRegex = /<table[^>]*>([\s\S]*?)<\/table>/gi;
     let tableMatch;
     
@@ -250,7 +265,9 @@ function parsePaksimDatabasesHTML(html) {
             .replace(/&nbsp;/g, ' ')
             .replace(/\s+/g, ' ')
             .trim();
-          if (content) cells.push(content);
+          if (content) {
+            cells.push(content);
+          }
         }
         
         if (cells.length >= 3) {
@@ -258,11 +275,16 @@ function parsePaksimDatabasesHTML(html) {
           
           for (let i = 0; i < cells.length; i++) {
             const cell = cells[i];
-            if (cell.match(/^[0-9]{13}$/)) cnic = cell;
-            else if (cell.match(/^03[0-9]{9}$/)) mobile = cell;
-            else if (cell.match(/[A-Za-z]/) && cell.length > 2 && !cell.match(/^[0-9]+$/)) {
-              if (name === 'N/A') name = cell;
-              else if (address === 'N/A') address = cell;
+            if (cell.match(/^[0-9]{13}$/)) {
+              cnic = cell;
+            } else if (cell.match(/^03[0-9]{9}$/)) {
+              mobile = cell;
+            } else if (cell.match(/[A-Za-z]/) && cell.length > 2 && !cell.match(/^[0-9]+$/)) {
+              if (name === 'N/A') {
+                name = cell;
+              } else if (address === 'N/A') {
+                address = cell;
+              }
             }
           }
           
@@ -282,18 +304,25 @@ function parsePaksimDatabasesHTML(html) {
       console.log('⚠️ Table parsing failed, trying alternative...');
       return parseAlternative(html);
     }
+    
     return results;
+    
   } catch (error) {
     console.error('Parser error:', error);
     return [];
   }
 }
 
+// =============================================
+// 🔧 ALTERNATIVE PARSER
+// =============================================
 function parseAlternative(html) {
   try {
     const results = [];
+    
     const clean = html.replace(/<script[\s\S]*?<\/script>/gi, '')
                      .replace(/<style[\s\S]*?<\/style>/gi, '');
+    
     const text = clean.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
     
     const cnicMatches = text.match(/\b([0-9]{13})\b/g) || [];
@@ -301,7 +330,11 @@ function parseAlternative(html) {
     const nameMatches = text.match(/\b([A-Z][a-z]+ [A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b/g) || [];
     const addressMatches = text.match(/\b([A-Z][a-z]+ [0-9]+ [A-Za-z\s,]+)/g) || [];
     
-    const maxLen = Math.max(cnicMatches.length, mobileMatches.length, nameMatches.length);
+    const maxLen = Math.max(
+      cnicMatches.length,
+      mobileMatches.length,
+      nameMatches.length
+    );
     
     for (let i = 0; i < maxLen; i++) {
       const name = nameMatches[i] || 'Unknown';
@@ -318,47 +351,107 @@ function parseAlternative(html) {
         });
       }
     }
+    
     return results;
+    
   } catch (error) {
     console.error('Alternative parser error:', error);
     return [];
   }
 }
 
+// =============================================
+// 🔧 SMART HELPER FUNCTIONS
+// =============================================
+
 function getSmartName(records) {
-  const garbage = ['data not recieved from nadra', 'not received', 'no data', 'unknown', 'n/a', 'null', 'undefined', 'no', '-', 'cnic', 'mobile', 'address', 'search'];
-  const names = records.map(r => r.Name).filter(n => n && n.trim().length > 0).map(n => n.trim());
+  const garbage = [
+    'data not recieved from nadra',
+    'data not received from nadra',
+    'not received',
+    'no data',
+    'unknown',
+    'n/a',
+    'null',
+    'undefined',
+    'no',
+    '-',
+    'cnic',
+    'mobile',
+    'address',
+    'search',
+    'not found'
+  ];
+  
+  const names = records
+    .map(r => r.Name)
+    .filter(n => n && n.toString().trim().length > 0)
+    .map(n => n.toString().trim());
+  
   if (names.length === 0) return 'Unknown';
   
-  const valid = names.filter(n => !garbage.some(g => n.toLowerCase().includes(g)));
-  if (valid.length === 0) return names[0];
+  const validNames = names.filter(name => {
+    const lower = name.toLowerCase();
+    return !garbage.some(g => lower.includes(g));
+  });
   
-  const count = {};
-  valid.forEach(n => count[n] = (count[n] || 0) + 1);
-  return Object.keys(count).reduce((a, b) => count[a] > count[b] ? a : b);
+  if (validNames.length === 0) {
+    return names[0];
+  }
+  
+  const nameCount = {};
+  validNames.forEach(name => {
+    nameCount[name] = (nameCount[name] || 0) + 1;
+  });
+  
+  let mostCommon = validNames[0];
+  let maxCount = 0;
+  Object.keys(nameCount).forEach(name => {
+    if (nameCount[name] > maxCount) {
+      maxCount = nameCount[name];
+      mostCommon = name;
+    }
+  });
+  
+  return mostCommon;
 }
 
 function getSmartAddress(records) {
-  const garbage = ['no', 'n/a', 'null', 'undefined', '-', 'na', 'no address'];
-  let best = 'No address available';
-  let maxLen = 0;
+  const garbage = ['no', 'n/a', 'null', 'undefined', '-', 'na', 'no address', 'none', 'nill'];
   
-  records.forEach(r => {
-    if (r.Address && r.Address.trim().length > 0) {
-      const addr = r.Address.trim();
-      if (!garbage.includes(addr.toLowerCase()) && addr.length > maxLen) {
-        maxLen = addr.length;
-        best = addr;
+  let bestAddress = 'No address available';
+  let maxLength = 0;
+  
+  records.forEach(record => {
+    if (record.Address && record.Address.toString().trim().length > 0) {
+      const addr = record.Address.toString().trim();
+      const lower = addr.toLowerCase();
+      
+      if (garbage.includes(lower)) return;
+      
+      if (addr.length > maxLength) {
+        maxLength = addr.length;
+        bestAddress = addr;
       }
     }
   });
-  return best;
+  
+  return bestAddress;
 }
 
 function getAllNumbers(records) {
-  return [...new Set(records.map(r => r.Mobile).filter(n => n && n.trim().length > 0).map(n => n.trim()))];
+  const numbers = records
+    .map(r => r.Mobile)
+    .filter(n => n && n.toString().trim().length > 0)
+    .map(n => n.toString().trim());
+  return [...new Set(numbers)];
 }
 
 function getAllCNICs(records) {
-  return [...new Set(records.map(r => r.Cnic).filter(c => c && c.trim().length >= 13).map(c => c.trim()))];
-            }
+  const cnis = records
+    .map(r => r.Cnic)
+    .filter(c => c && c.toString().trim().length > 0)
+    .map(c => c.toString().trim())
+    .filter(c => c.length >= 13);
+  return [...new Set(cnis)];
+        }
