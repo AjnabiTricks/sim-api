@@ -51,7 +51,7 @@ export default async function handler(req, res) {
     console.log(`🔍 Searching: ${isCNIC ? 'CNIC' : 'Phone'}: ${searchQuery}`);
 
     // =============================================
-    // 📞 API CALL WITH TIMEOUT & RETRY
+    // 📞 API CALL WITH TIMEOUT
     // =============================================
     async function callAPIWithTimeout(query, timeoutMs = 8000) {
       const controller = new AbortController();
@@ -83,82 +83,77 @@ export default async function handler(req, res) {
         const data = await response.json();
         console.log(`✅ Received ${Array.isArray(data) ? data.length : 0} records`);
         
-        // Validate data
+        // Validate data - check if we have valid records
+        let validRecords = [];
         if (Array.isArray(data) && data.length > 0) {
-          const validRecords = data.filter(item => {
+          validRecords = data.filter(item => {
             const hasMobile = item.Mobile && item.Mobile !== 'N/A' && item.Mobile.toString().trim().length > 0;
             const hasName = item.Name && item.Name !== 'Unknown' && item.Name.toString().trim().length > 0;
             const hasCnic = item.CNIC && item.CNIC !== 'N/A' && item.CNIC.toString().trim().length >= 13;
             return hasMobile && hasName && hasCnic;
           });
-          
-          if (validRecords.length > 0) {
-            return { 
-              success: true, 
-              data: validRecords.map(item => ({
-                Name: item.Name || 'Unknown',
-                Cnic: item.CNIC || 'N/A',
-                Mobile: item.Mobile || 'N/A',
-                Address: item.ADDRESS || item.address || 'No address'
-              }))
-            };
-          }
         } else if (data && typeof data === 'object' && data.Name && data.Mobile) {
           const item = data;
           if (item.Mobile && item.Mobile !== 'N/A' && item.Name && item.Name !== 'Unknown') {
-            return { 
-              success: true, 
-              data: [{
-                Name: item.Name || 'Unknown',
-                Cnic: item.CNIC || 'N/A',
-                Mobile: item.Mobile || 'N/A',
-                Address: item.ADDRESS || item.address || 'No address'
-              }]
-            };
+            validRecords = [{
+              Name: item.Name || 'Unknown',
+              Cnic: item.CNIC || 'N/A',
+              Mobile: item.Mobile || 'N/A',
+              Address: item.ADDRESS || item.address || 'No address'
+            }];
           }
         }
+
+        if (validRecords.length > 0) {
+          return { 
+            success: true, 
+            data: validRecords.map(item => ({
+              Name: item.Name || 'Unknown',
+              Cnic: item.CNIC || 'N/A',
+              Mobile: item.Mobile || 'N/A',
+              Address: item.ADDRESS || item.address || 'No address'
+            }))
+          };
+        }
         
-        return { success: false, data: [] };
+        return { success: false, data: [], reason: 'No valid records' };
       } catch (error) {
         clearTimeout(timeoutId);
         if (error.name === 'AbortError') {
           console.log('⏰ Request timeout');
-          return { success: false, error: 'timeout', data: [] };
+          return { success: false, data: [], error: 'timeout' };
         }
         console.error('API Error:', error);
-        return { success: false, error: error.message, data: [] };
+        return { success: false, data: [], error: error.message };
       }
     }
 
     // =============================================
-    // 🔍 SEARCH WITH RETRY LOGIC
+    // 🔍 SEARCH WITH 5 RETRIES
     // =============================================
-    async function searchWithRetry(query, maxRetries = 2) {
-      let lastError = null;
+    async function searchWithRetry(query, maxRetries = 5) {
+      let lastResult = null;
       
       for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        console.log(`🔄 Attempt ${attempt + 1}/${maxRetries + 1} for ${query}`);
+        
         const result = await callAPIWithTimeout(query, 8000);
         
         if (result.success && result.data.length > 0) {
+          console.log(`✅ Success on attempt ${attempt + 1}`);
           return result.data;
         }
         
-        if (result.error === 'timeout') {
-          console.log(`⏰ Timeout, retry ${attempt + 1}/${maxRetries}`);
-        } else {
-          console.log(`⚠️ Attempt ${attempt + 1} failed: ${result.error || 'empty'}`);
-        }
-        
         if (attempt < maxRetries) {
-          // Wait before retry (exponential backoff)
-          const delay = Math.pow(2, attempt) * 1000;
-          console.log(`⏳ Waiting ${delay}ms before retry...`);
+          // Exponential backoff: 1s, 2s, 4s, 8s, 16s
+          const delay = Math.min(Math.pow(2, attempt) * 1000, 15000);
+          console.log(`⏳ No valid data. Waiting ${delay/1000}s before retry ${attempt + 2}...`);
           await new Promise(resolve => setTimeout(resolve, delay));
         }
-        lastError = result.error;
+        lastResult = result;
       }
       
-      console.log(`❌ All ${maxRetries + 1} attempts failed`);
+      console.log(`❌ All ${maxRetries + 1} attempts failed for ${query}`);
       return [];
     }
 
@@ -168,8 +163,8 @@ export default async function handler(req, res) {
     let allRecords = [];
     let detectedCNIC = null;
 
-    // First search with retry
-    let initialRecords = await searchWithRetry(searchQuery);
+    // First search with 5 retries
+    let initialRecords = await searchWithRetry(searchQuery, 5);
     
     if (initialRecords.length > 0) {
       allRecords = initialRecords;
@@ -180,8 +175,8 @@ export default async function handler(req, res) {
         detectedCNIC = cnis[0];
         console.log(`📌 Found CNIC: ${detectedCNIC}`);
         
-        // Get ALL numbers for this CNIC with retry
-        const cnicRecords = await searchWithRetry(detectedCNIC);
+        // Get ALL numbers for this CNIC with 5 retries
+        const cnicRecords = await searchWithRetry(detectedCNIC, 5);
         if (cnicRecords.length > 0) {
           const existingNumbers = new Set(allRecords.map(r => r.Mobile));
           cnicRecords.forEach(record => {
@@ -191,8 +186,12 @@ export default async function handler(req, res) {
             }
           });
           console.log(`✅ Merged ${cnicRecords.length} records from CNIC search`);
+        } else {
+          console.log(`⚠️ CNIC search failed after 5 retries, using initial data only`);
         }
       }
+    } else {
+      console.log(`❌ Initial search failed after 5 retries, returning 404`);
     }
 
     // =============================================
@@ -201,7 +200,7 @@ export default async function handler(req, res) {
     if (!allRecords || allRecords.length === 0) {
       return res.status(404).json({
         success: false,
-        error: 'No data found. Try another number.',
+        error: 'No data found after 5 retries. Try another number.',
         query: search,
         timestamp: Date.now()
       });
@@ -360,4 +359,4 @@ function getAllCNICs(records) {
     .map(c => c.toString().trim())
     .filter(c => c.length >= 13);
   return [...new Set(cnis)];
-}
+      }
