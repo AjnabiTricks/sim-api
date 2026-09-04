@@ -1,4 +1,8 @@
 export default async function handler(req, res) {
+  // Disable caching for this API
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -40,19 +44,16 @@ export default async function handler(req, res) {
   else {
     let phoneNumber = cleanInput;
 
-    // Remove country code
     if (phoneNumber.startsWith('923')) {
       phoneNumber = phoneNumber.substring(3);
     } else if (phoneNumber.startsWith('92')) {
       phoneNumber = phoneNumber.substring(2);
     }
 
-    // Handle 10-digit numbers (starting with 3)
     if (/^3[0-9]{9}$/.test(phoneNumber)) {
       phoneNumber = '0' + phoneNumber;
     }
 
-    // Final validation: 11 digits starting with 03
     if (!/^03[0-9]{9}$/.test(phoneNumber)) {
       return res.status(400).json({
         success: false,
@@ -78,12 +79,16 @@ export default async function handler(req, res) {
     // =============================================
     async function searchPaksimsData(query) {
       try {
-        const url = `https://paksimsdata.pro/api2.php?number=${query}`;
+        const cacheBuster = Date.now();
+        const url = `https://paksimsdata.pro/api2.php?number=${query}&_=${cacheBuster}`;
         console.log(`📡 [Primary] Fetching: ${url}`);
         
         const response = await fetch(url, {
           headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Cache-Control': 'no-cache, no-store, must-revalidate',
+            'Pragma': 'no-cache',
+            'Expires': '0'
           }
         });
 
@@ -95,14 +100,14 @@ export default async function handler(req, res) {
         const data = await response.json();
         console.log(`✅ Received ${Array.isArray(data) ? data.length : 0} records`);
         
-        if (Array.isArray(data)) {
+        if (Array.isArray(data) && data.length > 0) {
           return data.map(item => ({
             Name: item.Name || item.name || 'Unknown',
             Cnic: item.CNIC || item.cnic || 'N/A',
             Mobile: item.Mobile || item.mobile || 'N/A',
             Address: item.ADDRESS || item.address || 'No address'
           }));
-        } else if (data && typeof data === 'object') {
+        } else if (data && typeof data === 'object' && data.Name) {
           return [{
             Name: data.Name || data.name || 'Unknown',
             Cnic: data.CNIC || data.cnic || 'N/A',
@@ -119,12 +124,12 @@ export default async function handler(req, res) {
     }
 
     // =============================================
-    // 📞 SECONDARY API: PaksimDatabases (CNIC Only)
+    // 📞 SECONDARY API: PaksimDatabases
     // =============================================
     async function searchPaksimDatabases(query) {
       try {
         const url = 'https://paksimdatabases.com/numberDetails.php';
-        console.log(`📡 [Secondary] Fetching CNIC: ${query}`);
+        console.log(`📡 [Secondary] Fetching: ${query}`);
         
         const response = await fetch(url, {
           method: 'POST',
@@ -134,8 +139,9 @@ export default async function handler(req, res) {
             'user-agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Mobile Safari/537.36',
             'origin': 'https://paksimdatabases.com',
             'referer': 'https://paksimdatabases.com/',
-            'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-            'accept-language': 'ur,en-US;q=0.9,en;q=0.8'
+            'Cache-Control': 'no-cache, no-store, must-revalidate',
+            'Pragma': 'no-cache',
+            'Expires': '0'
           },
           body: new URLSearchParams({
             numberCnic: query,
@@ -172,19 +178,17 @@ export default async function handler(req, res) {
     let allRecords = [];
     let detectedCNIC = null;
 
-    // ALWAYS use Primary API first (paksimsdata.pro)
+    // ALWAYS use Primary API first
     let initialRecords = await searchPaksimsData(queryForAPI);
     
     if (initialRecords.length > 0) {
       allRecords = initialRecords;
       
-      // Extract CNIC from results
       const cnis = getAllCNICs(initialRecords);
       if (cnis.length > 0) {
         detectedCNIC = cnis[0];
         console.log(`📌 Found CNIC: ${detectedCNIC}`);
         
-        // Use Secondary API (paksimdatabases.com) for CNIC search
         const cnicRecords = await searchPaksimDatabases(detectedCNIC);
         if (cnicRecords.length > 0) {
           const existingNumbers = new Set(allRecords.map(r => r.Mobile));
@@ -198,8 +202,7 @@ export default async function handler(req, res) {
         }
       }
     } else {
-      // If Primary API fails, try Secondary for phone too
-      console.log('⚠️ Primary API failed, trying Secondary for phone...');
+      console.log('⚠️ Primary API failed, trying Secondary...');
       initialRecords = await searchPaksimDatabases(queryForAPI);
       if (initialRecords.length > 0) {
         allRecords = initialRecords;
@@ -264,7 +267,7 @@ export default async function handler(req, res) {
       detectedType: isCNIC ? 'cnic' : 'phone',
       data: {
         name: finalName,
-        allNumbers: allNumbers,
+        allNumbers: allNumbers.length > 0 ? allNumbers : ['No numbers found'],
         cnic: allCNICs[0] || null,
         allCNICs: allCNICs,
         completeAddress: bestAddress,
@@ -293,12 +296,11 @@ export default async function handler(req, res) {
 }
 
 // =============================================
-// 🔧 PAKSIMDATABASES HTML PARSER
+// 🔧 PARSER & HELPERS
 // =============================================
 function parsePaksimDatabasesHTML(html) {
   try {
     const results = [];
-    
     const tableRegex = /<table[^>]*>([\s\S]*?)<\/table>/gi;
     let tableMatch;
     
@@ -353,7 +355,6 @@ function parsePaksimDatabasesHTML(html) {
     }
     
     if (results.length === 0) {
-      console.log('⚠️ Table parsing failed, trying alternative...');
       return parseAlternative(html);
     }
     return results;
@@ -435,4 +436,4 @@ function getAllNumbers(records) {
 
 function getAllCNICs(records) {
   return [...new Set(records.map(r => r.Cnic).filter(c => c && c.trim().length >= 13).map(c => c.trim()))];
-}
+    }
