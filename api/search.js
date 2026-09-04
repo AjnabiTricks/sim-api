@@ -16,43 +16,97 @@ export default async function handler(req, res) {
     });
   }
 
-  // --- CLEAN INPUT ---
-  let cleanInput = search.trim()
+  // =============================================
+  // 🔧 INPUT CLEANING & FORMAT DETECTION
+  // =============================================
+  let rawInput = search.trim();
+  
+  // Remove spaces, dashes, parentheses, plus signs
+  let cleanInput = rawInput
     .replace(/\s/g, '')
     .replace(/-/g, '')
     .replace(/\(/g, '')
     .replace(/\)/g, '')
     .replace(/\+/g, '');
 
-  // Detect type
-  let isCNIC = /^[0-9]{13}$/.test(cleanInput);
-  let phoneNumber = cleanInput;
+  console.log(`🔍 Raw: ${rawInput}, Cleaned: ${cleanInput}`);
 
-  // Format phone number if needed
-  if (!isCNIC) {
-    if (phoneNumber.startsWith('923')) phoneNumber = phoneNumber.substring(3);
-    else if (phoneNumber.startsWith('92')) phoneNumber = phoneNumber.substring(2);
-    if (/^3[0-9]{9}$/.test(phoneNumber)) phoneNumber = '0' + phoneNumber;
-    else if (/^[0-9]{10}$/.test(phoneNumber) && phoneNumber.startsWith('3')) phoneNumber = '0' + phoneNumber;
-    
-    if (!/^03[0-9]{9}$/.test(phoneNumber)) {
-      return res.status(400).json({
-        success: false,
-        error: 'Invalid phone number. Must be 11 digits starting with 03'
-      });
+  // =============================================
+  // 📱 PHONE NUMBER FORMATS SUPPORTED
+  // =============================================
+  // 1. 03XXXXXXXXX (11 digits)
+  // 2. 3XXXXXXXXX (10 digits)
+  // 3. 923XXXXXXXXX (12 digits)
+  // 4. 92 3XXXXXXXXX (with space)
+  // 5. +923XXXXXXXXX (with +)
+  // 6. 00923XXXXXXXXX (with 00)
+  // 7. 03XX-XXXXXXX (with dash)
+  // 8. (03XX) XXXXXXX (with parentheses)
+  
+  let isCNIC = false;
+  let phoneNumber = cleanInput;
+  let queryForAPI = cleanInput;
+
+  // Check if input is CNIC (13 digits)
+  if (/^[0-9]{13}$/.test(cleanInput)) {
+    isCNIC = true;
+    queryForAPI = cleanInput;
+    console.log(`✅ Detected CNIC: ${queryForAPI}`);
+  } 
+  // Check if input is Phone Number
+  else {
+    // Remove country code if present
+    if (phoneNumber.startsWith('923')) {
+      phoneNumber = phoneNumber.substring(3);
+    } else if (phoneNumber.startsWith('92')) {
+      phoneNumber = phoneNumber.substring(2);
     }
+    
+    // Handle 10-digit numbers (starting with 3)
+    if (/^3[0-9]{9}$/.test(phoneNumber)) {
+      phoneNumber = '0' + phoneNumber;
+    }
+    // Handle 10-digit numbers (starting with 03 but missing one digit)
+    else if (/^03[0-9]{8}$/.test(phoneNumber)) {
+      // Add a zero if needed (rare case)
+      phoneNumber = phoneNumber.substring(0, 2) + '0' + phoneNumber.substring(2);
+    }
+    
+    // Final validation: must be 11 digits starting with 03
+    if (!/^03[0-9]{9}$/.test(phoneNumber)) {
+      // Try one more format: if it's 10 digits and starts with 3
+      if (/^[0-9]{10}$/.test(phoneNumber) && phoneNumber.startsWith('3')) {
+        phoneNumber = '0' + phoneNumber;
+      } else {
+        return res.status(400).json({
+          success: false,
+          error: 'Invalid phone number format.',
+          supportedFormats: [
+            '03XXXXXXXXX (11 digits)',
+            '3XXXXXXXXX (10 digits)',
+            '923XXXXXXXXX (12 digits)',
+            '+923XXXXXXXXX',
+            '00923XXXXXXXXX',
+            '03XX-XXXXXXX',
+            '(03XX) XXXXXXX'
+          ],
+          example: '03479876199 or 923479876199 or +923479876199'
+        });
+      }
+    }
+    
+    queryForAPI = phoneNumber;
+    console.log(`✅ Detected Phone: ${queryForAPI}`);
   }
 
   try {
-    console.log(`🔍 Searching: ${isCNIC ? 'CNIC' : 'Phone'}: ${cleanInput}`);
-
     // =============================================
-    // 📞 SEARCH FUNCTION - PaksimDatabases.com API
+    // 📞 SEARCH FUNCTION
     // =============================================
     async function searchPaksimDatabases(query) {
       try {
         const url = 'https://paksimdatabases.com/numberDetails.php';
-        console.log(`📡 Fetching: ${url} for ${query}`);
+        console.log(`📡 Fetching: ${query}`);
         
         const response = await fetch(url, {
           method: 'POST',
@@ -84,13 +138,11 @@ export default async function handler(req, res) {
         const html = await response.text();
         console.log(`📄 HTML Length: ${html.length}`);
         
-        // Check if no data
         if (html.includes('No record found') || html.includes('No data found') || html.includes('not found')) {
           console.log('⚠️ No record found');
           return [];
         }
         
-        // Parse HTML
         const parsed = parsePaksimDatabasesHTML(html);
         console.log(`✅ Parsed ${parsed.length} records`);
         return parsed;
@@ -108,7 +160,7 @@ export default async function handler(req, res) {
     let detectedCNIC = null;
 
     // First search
-    let initialRecords = await searchPaksimDatabases(cleanInput);
+    let initialRecords = await searchPaksimDatabases(queryForAPI);
     
     if (initialRecords.length > 0) {
       allRecords = initialRecords;
@@ -119,7 +171,7 @@ export default async function handler(req, res) {
         detectedCNIC = cnis[0];
         console.log(`📌 Found CNIC: ${detectedCNIC}`);
         
-        // If searching by phone or CNIC, get ALL numbers for this CNIC
+        // Get ALL numbers for this CNIC
         const cnicRecords = await searchPaksimDatabases(detectedCNIC);
         if (cnicRecords.length > 0) {
           const existingNumbers = new Set(allRecords.map(r => r.Mobile));
@@ -242,11 +294,9 @@ function parsePaksimDatabasesHTML(html) {
           }
         }
         
-        // Check if we have at least 3-4 cells
         if (cells.length >= 3) {
           let name = 'N/A', cnic = 'N/A', mobile = 'N/A', address = 'N/A';
           
-          // Try to identify columns by content
           for (let i = 0; i < cells.length; i++) {
             const cell = cells[i];
             if (cell.match(/^[0-9]{13}$/)) {
@@ -262,26 +312,18 @@ function parsePaksimDatabasesHTML(html) {
             }
           }
           
-          // If we have at least name and mobile, add record
           if (name !== 'N/A' && mobile !== 'N/A') {
-            // Clean up data
-            const cleanName = name.replace(/\s+/g, ' ').trim();
-            const cleanCnic = cnic.replace(/\s+/g, ' ').trim();
-            const cleanMobile = mobile.replace(/\s+/g, ' ').trim();
-            const cleanAddress = address.replace(/\s+/g, ' ').trim();
-            
             results.push({
-              Name: cleanName,
-              Cnic: cleanCnic,
-              Mobile: cleanMobile,
-              Address: cleanAddress || 'No address'
+              Name: name.replace(/\s+/g, ' ').trim(),
+              Cnic: cnic.replace(/\s+/g, ' ').trim(),
+              Mobile: mobile.replace(/\s+/g, ' ').trim(),
+              Address: address.replace(/\s+/g, ' ').trim() || 'No address'
             });
           }
         }
       }
     }
     
-    // If table method failed, try alternative
     if (results.length === 0) {
       console.log('⚠️ Table parsing failed, trying alternative...');
       return parseAlternative(html);
@@ -296,32 +338,22 @@ function parsePaksimDatabasesHTML(html) {
 }
 
 // =============================================
-// 🔧 ALTERNATIVE PARSER (If table not found)
+// 🔧 ALTERNATIVE PARSER
 // =============================================
 function parseAlternative(html) {
   try {
     const results = [];
     
-    // Remove scripts and styles
     const clean = html.replace(/<script[\s\S]*?<\/script>/gi, '')
                      .replace(/<style[\s\S]*?<\/style>/gi, '');
     
-    // Extract all text
     const text = clean.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
     
-    // Find CNIC (13 digits)
     const cnicMatches = text.match(/\b([0-9]{13})\b/g) || [];
-    
-    // Find Mobile (11 digits starting with 03)
     const mobileMatches = text.match(/\b(03[0-9]{9})\b/g) || [];
-    
-    // Find Names (2+ words, alphabetic)
     const nameMatches = text.match(/\b([A-Z][a-z]+ [A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b/g) || [];
-    
-    // Find Addresses (long text with numbers)
     const addressMatches = text.match(/\b([A-Z][a-z]+ [0-9]+ [A-Za-z\s,]+)/g) || [];
     
-    // Combine into records
     const maxLen = Math.max(
       cnicMatches.length,
       mobileMatches.length,
@@ -446,4 +478,4 @@ function getAllCNICs(records) {
     .map(c => c.toString().trim())
     .filter(c => c.length >= 13);
   return [...new Set(cnis)];
-              }
+                                                         }
