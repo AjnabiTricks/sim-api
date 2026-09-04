@@ -1,22 +1,15 @@
 {
   "version": 2,
-  "builds": [
-    {
-      "src": "api/search.js",
-      "use": "@vercel/node",
-      "config": {
-        "maxDuration": 30
-      }
-    }
-  ],
   "routes": [
     {
       "src": "/api/search",
       "dest": "/api/search.js"
-    },
-    {
-      "src": "/api/batch",
-      "dest": "/api/search.js"
     }
-  ]
+  ],
+  "functions": {
+    "api/search.js": {
+      "maxDuration": 30,
+      "memory": 1024
+    }
+  }
 }
