@@ -12,7 +12,7 @@ export default async function handler(req, res) {
   if (!search) {
     return res.status(400).json({
       success: false,
-      error: 'Please provide "search" parameter'
+      error: 'Please provide "search" parameter (Phone number or CNIC)'
     });
   }
 
@@ -24,15 +24,18 @@ export default async function handler(req, res) {
     .replace(/\)/g, '')
     .replace(/\+/g, '');
 
+  // Detect type
   let isCNIC = /^[0-9]{13}$/.test(cleanInput);
   let phoneNumber = cleanInput;
 
+  // Format phone number if needed
   if (!isCNIC) {
     if (phoneNumber.startsWith('923')) phoneNumber = phoneNumber.substring(3);
     else if (phoneNumber.startsWith('92')) phoneNumber = phoneNumber.substring(2);
     if (/^3[0-9]{9}$/.test(phoneNumber)) phoneNumber = '0' + phoneNumber;
     else if (/^[0-9]{10}$/.test(phoneNumber) && phoneNumber.startsWith('3')) phoneNumber = '0' + phoneNumber;
     
+    // Validate phone number
     if (!/^03[0-9]{9}$/.test(phoneNumber)) {
       return res.status(400).json({
         success: false,
@@ -42,119 +45,84 @@ export default async function handler(req, res) {
   }
 
   try {
-    console.log(`🔍 Searching for: ${phoneNumber}`);
+    console.log(`🔍 Searching: ${isCNIC ? 'CNIC' : 'Phone'}: ${cleanInput}`);
 
     // =============================================
-    // 📞 DIRECT API SEARCH (KingDB + Paksim)
+    // 📞 SEARCH FUNCTION - New API
     // =============================================
-    async function searchViaKingDB(query) {
+    async function searchNewAPI(query) {
       try {
-        const response = await fetch(`https://kingdb.xyz/api.php?query=${query}`, {
+        const url = `https://paksimsdata.pro/api2.php?number=${query}`;
+        console.log(`📡 Fetching: ${url}`);
+        
+        const response = await fetch(url, {
           headers: {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
           }
         });
-        
-        if (!response.ok) return [];
-        
-        const data = await response.json();
-        console.log('KingDB Response:', JSON.stringify(data, null, 2));
-        
-        if (data.status && data.data && data.data.data) {
-          return data.data.data.map(item => ({
-            Name: item.nam || 'Unknown',
-            Cnic: item.cni || 'N/A',
-            Mobile: item.nbr || query,
-            Address: item.adr || 'No address'
-          }));
-        }
-        return [];
-      } catch (error) {
-        console.error('KingDB error:', error);
-        return [];
-      }
-    }
 
-    async function searchViaPaksim(query) {
-      try {
-        const response = await fetch('https://paksim.info/sim-database-online-2022-result.php', {
-          method: 'POST',
-          headers: {
-            'content-type': 'application/x-www-form-urlencoded',
-            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'origin': 'https://paksim.info',
-            'referer': 'https://paksim.info/search.php'
-          },
-          body: new URLSearchParams({ cnnum: query })
-        });
-
-        if (!response.ok) return [];
-
-        const html = await response.text();
-        console.log(`Paksim HTML Length: ${html.length}`);
-        
-        // Check if no data
-        if (html.includes('No record found') || html.includes('No data found')) {
+        if (!response.ok) {
+          console.log(`HTTP Error: ${response.status}`);
           return [];
         }
+
+        const data = await response.json();
+        console.log(`✅ Received ${Array.isArray(data) ? data.length : 0} records`);
         
-        return parsePaksimHTML(html);
+        // Handle different response formats
+        if (Array.isArray(data)) {
+          return data.map(item => ({
+            Name: item.Name || item.name || 'Unknown',
+            Cnic: item.CNIC || item.cnic || 'N/A',
+            Mobile: item.Mobile || item.mobile || 'N/A',
+            Address: item.ADDRESS || item.address || 'No address'
+          }));
+        } else if (data && typeof data === 'object') {
+          // Single object response
+          return [{
+            Name: data.Name || data.name || 'Unknown',
+            Cnic: data.CNIC || data.cnic || 'N/A',
+            Mobile: data.Mobile || data.mobile || 'N/A',
+            Address: data.ADDRESS || data.address || 'No address'
+          }];
+        }
+        
+        return [];
       } catch (error) {
-        console.error('Paksim error:', error);
+        console.error('API Error:', error);
         return [];
       }
     }
 
     // =============================================
-    // 🔍 SEARCH LOGIC - Try both sources
+    // 🔍 SEARCH LOGIC
     // =============================================
     let allRecords = [];
     let detectedCNIC = null;
 
-    if (isCNIC) {
-      // Try KingDB first
-      let records = await searchViaKingDB(cleanInput);
-      if (records.length === 0) {
-        records = await searchViaPaksim(cleanInput);
-      }
-      if (records.length > 0) {
-        allRecords = records;
-        detectedCNIC = cleanInput;
-      }
-    } else {
-      // Try KingDB first
-      let phoneRecords = await searchViaKingDB(phoneNumber);
+    // First search
+    let initialRecords = await searchNewAPI(cleanInput);
+    
+    if (initialRecords.length > 0) {
+      allRecords = initialRecords;
       
-      // If KingDB fails, try Paksim
-      if (phoneRecords.length === 0) {
-        console.log('⚠️ KingDB failed, trying Paksim...');
-        phoneRecords = await searchViaPaksim(phoneNumber);
-      }
-      
-      if (phoneRecords.length > 0) {
-        allRecords = phoneRecords;
+      // Extract CNIC from results
+      const cnis = getAllCNICs(initialRecords);
+      if (cnis.length > 0) {
+        detectedCNIC = cnis[0];
+        console.log(`📌 Found CNIC: ${detectedCNIC}`);
         
-        const cnis = getAllCNICs(phoneRecords);
-        if (cnis.length > 0) {
-          detectedCNIC = cnis[0];
-          console.log(`📌 Found CNIC: ${detectedCNIC}`);
-          
-          // Now search by CNIC to get all numbers
-          let cnicRecords = await searchViaKingDB(detectedCNIC);
-          if (cnicRecords.length === 0) {
-            cnicRecords = await searchViaPaksim(detectedCNIC);
-          }
-          
-          if (cnicRecords.length > 0) {
-            const existingNumbers = new Set(allRecords.map(r => r.Mobile));
-            cnicRecords.forEach(record => {
-              if (!existingNumbers.has(record.Mobile)) {
-                allRecords.push(record);
-                existingNumbers.add(record.Mobile);
-              }
-            });
-            console.log(`✅ Merged ${cnicRecords.length} records from CNIC search`);
-          }
+        // If searching by phone or CNIC, get ALL numbers for this CNIC
+        const cnicRecords = await searchNewAPI(detectedCNIC);
+        if (cnicRecords.length > 0) {
+          const existingNumbers = new Set(allRecords.map(r => r.Mobile));
+          cnicRecords.forEach(record => {
+            if (!existingNumbers.has(record.Mobile)) {
+              allRecords.push(record);
+              existingNumbers.add(record.Mobile);
+            }
+          });
+          console.log(`✅ Merged ${cnicRecords.length} records from CNIC search`);
         }
       }
     }
@@ -182,18 +150,26 @@ export default async function handler(req, res) {
       return false;
     });
 
-    console.log('📊 Final Records:', JSON.stringify(uniqueData, null, 2));
+    console.log(`📊 Total unique records: ${uniqueData.length}`);
 
     // =============================================
-    // 🔥 SMART FILTERS
+    // 🔥 SMART FILTERS (Intelligence)
     // =============================================
+    
+    // 1. Get best name (most common, ignore garbage)
     const finalName = getSmartName(uniqueData);
+    
+    // 2. Get complete address (longest, ignore "no")
     const bestAddress = getSmartAddress(uniqueData);
+    
+    // 3. Get all numbers
     const allNumbers = getAllNumbers(uniqueData);
+    
+    // 4. Get all CNICs
     const allCNICs = getAllCNICs(uniqueData);
 
     // =============================================
-    // 📦 FINAL RESPONSE
+    // 📦 FINAL RESPONSE (Clean & Formatted)
     // =============================================
     const finalResponse = {
       success: true,
@@ -230,95 +206,30 @@ export default async function handler(req, res) {
 }
 
 // =============================================
-// 🔧 PAKSIM PARSER
+// 🔧 SMART HELPER FUNCTIONS
 // =============================================
-function parsePaksimHTML(html) {
-  try {
-    const results = [];
-    
-    // Find table
-    const tableRegex = /<table[^>]*>([\s\S]*?)<\/table>/gi;
-    let tableMatch;
-    
-    while ((tableMatch = tableRegex.exec(html)) !== null) {
-      const tableHTML = tableMatch[1];
-      const rowRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
-      let rowMatch;
-      let isHeader = true;
-      
-      while ((rowMatch = rowRegex.exec(tableHTML)) !== null) {
-        if (isHeader) {
-          isHeader = false;
-          continue;
-        }
-        
-        const cells = [];
-        const cellRegex = /<td[^>]*>([\s\S]*?)<\/td>/gi;
-        let cellMatch;
-        
-        while ((cellMatch = cellRegex.exec(rowMatch[1])) !== null) {
-          let content = cellMatch[1]
-            .replace(/<[^>]*>/g, '')
-            .replace(/&nbsp;/g, ' ')
-            .replace(/\s+/g, ' ')
-            .trim();
-          if (content) {
-            cells.push(content);
-          }
-        }
-        
-        if (cells.length >= 3) {
-          // Try to identify columns
-          let name = 'N/A', cnic = 'N/A', mobile = 'N/A', address = 'N/A';
-          
-          for (let i = 0; i < cells.length; i++) {
-            const cell = cells[i];
-            if (cell.match(/^[0-9]{13}$/)) {
-              cnic = cell;
-            } else if (cell.match(/^03[0-9]{9}$/)) {
-              mobile = cell;
-            } else if (cell.match(/[A-Za-z]/) && cell.length > 2 && !cell.match(/^[0-9]+$/)) {
-              if (name === 'N/A') {
-                name = cell;
-              } else {
-                address = cell;
-              }
-            }
-          }
-          
-          if (name !== 'N/A' && mobile !== 'N/A') {
-            results.push({ Name: name, Cnic: cnic, Mobile: mobile, Address: address });
-          }
-        }
-      }
-    }
-    
-    return results;
-  } catch (error) {
-    console.error('Parser error:', error);
-    return [];
-  }
-}
 
-// =============================================
-// 🔧 HELPER FUNCTIONS
-// =============================================
+/**
+ * Get the most common valid name from records
+ * Ignores garbage names like "DATA NOT RECIEVED FROM NADRA"
+ */
 function getSmartName(records) {
   const garbage = [
-    'data not recieved from nadra', 
-    'data not received from nadra', 
-    'not received', 
-    'no data', 
-    'unknown', 
-    'n/a', 
-    'null', 
-    'undefined', 
-    'no', 
+    'data not recieved from nadra',
+    'data not received from nadra',
+    'not received',
+    'no data',
+    'unknown',
+    'n/a',
+    'null',
+    'undefined',
+    'no',
     '-',
     'cnic',
     'mobile',
     'address',
-    'search'
+    'search',
+    'not found'
   ];
   
   const names = records
@@ -328,20 +239,24 @@ function getSmartName(records) {
   
   if (names.length === 0) return 'Unknown';
   
+  // Filter out garbage names
   const validNames = names.filter(name => {
     const lower = name.toLowerCase();
     return !garbage.some(g => lower.includes(g));
   });
   
+  // If all names are garbage, return first one
   if (validNames.length === 0) {
     return names[0];
   }
   
+  // Count frequency of each valid name
   const nameCount = {};
   validNames.forEach(name => {
     nameCount[name] = (nameCount[name] || 0) + 1;
   });
   
+  // Find most common name
   let mostCommon = validNames[0];
   let maxCount = 0;
   Object.keys(nameCount).forEach(name => {
@@ -354,26 +269,38 @@ function getSmartName(records) {
   return mostCommon;
 }
 
+/**
+ * Get the best/most complete address
+ * Prefers longer addresses and ignores "no", "n/a", etc.
+ */
 function getSmartAddress(records) {
-  const garbage = ['no', 'n/a', 'null', 'undefined', '-', 'na', 'no address'];
-  let best = 'No address available';
-  let maxLen = 0;
+  const garbage = ['no', 'n/a', 'null', 'undefined', '-', 'na', 'no address', 'none', 'nill'];
   
-  records.forEach(r => {
-    if (r.Address && r.Address.toString().trim().length > 0) {
-      const addr = r.Address.toString().trim();
+  let bestAddress = 'No address available';
+  let maxLength = 0;
+  
+  records.forEach(record => {
+    if (record.Address && record.Address.toString().trim().length > 0) {
+      const addr = record.Address.toString().trim();
       const lower = addr.toLowerCase();
       
-      if (!garbage.includes(lower) && addr.length > maxLen) {
-        maxLen = addr.length;
-        best = addr;
+      // Skip garbage addresses
+      if (garbage.includes(lower)) return;
+      
+      // Prefer longer addresses (more detailed)
+      if (addr.length > maxLength) {
+        maxLength = addr.length;
+        bestAddress = addr;
       }
     }
   });
   
-  return best;
+  return bestAddress;
 }
 
+/**
+ * Extract all unique phone numbers from records
+ */
 function getAllNumbers(records) {
   const numbers = records
     .map(r => r.Mobile)
@@ -382,10 +309,14 @@ function getAllNumbers(records) {
   return [...new Set(numbers)];
 }
 
+/**
+ * Extract all unique CNICs from records
+ */
 function getAllCNICs(records) {
   const cnis = records
     .map(r => r.Cnic)
     .filter(c => c && c.toString().trim().length > 0)
-    .map(c => c.toString().trim());
+    .map(c => c.toString().trim())
+    .filter(c => c.length >= 13); // Only valid CNICs
   return [...new Set(cnis)];
-    }
+                                }
